@@ -1,0 +1,7 @@
+node_modules/
+dist/
+bin/*
+!bin/vad/
+backup-*/
+*.log
+.env

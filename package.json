@@ -1,0 +1,97 @@
+{
+  "name": "murmur",
+  "version": "0.8.0",
+  "description": "Local AI note taker and chat: whisper.cpp for the mic, llama.cpp for chat, EmbeddingGemma for recall",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --publish never",
+    "test": "node --test tests/lib.test.js",
+    "eval:intent": "node tests/intent-eval.js"
+  },
+  "private": true,
+  "updateUrl": "https://github.com/amon28/murmur/releases/latest/download/",
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
+    "electron-updater": "^6.8.11",
+    "mammoth": "^1.13.0",
+    "playwright-core": "^1.64.1",
+    "unpdf": "^1.9.1"
+  },
+  "productName": "Murmur",
+  "author": "Murmur",
+  "build": {
+    "appId": "local.murmur.app",
+    "productName": "Murmur",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "snip-preload.js",
+      "lib.js",
+      "vecstore.js",
+      "embedder.mjs",
+      "websearch.js",
+      "CHANGELOG.md",
+      "renderer/**",
+      "package.json",
+      "node_modules/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/{darwin,linux}/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**",
+      "!**/*.{map,ts}",
+      "!node_modules/**/*.md",
+      "!node_modules/**/{test,tests,docs,example,examples}/**"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**",
+      "node_modules/sharp/**",
+      "node_modules/@img/**",
+      "node_modules/onnxruntime-common/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Murmur",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Murmur-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/amon28/murmur/releases/latest/download/"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amon28/murmur.git"
+  }
+}

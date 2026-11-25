@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src data:">
+  <title>Murmur: pick part of the screen</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; cursor: crosshair; user-select: none; background: #000 }
+    #shot { position: fixed; inset: 0; width: 100vw; height: 100vh }
+    #dim { position: fixed; inset: 0; background: rgba(0, 0, 0, .45) }
+    #box { position: fixed; display: none; outline: 2px solid #8ab4ff; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45); background-repeat: no-repeat }
+    #tip { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; border-radius: 16px; background: #15161aee; color: #e7e7ea; font: 13px system-ui; border: 1px solid #2e3039; pointer-events: none }
+    #size { position: fixed; display: none; padding: 2px 6px; border-radius: 6px; background: #15161aee; color: #e7e7ea; font: 11px system-ui; pointer-events: none }
+  </style>
+</head>
+<body>
+  <img id="shot" alt="">
+  <div id="dim"></div>
+  <div id="box"></div>
+  <div id="size"></div>
+  <div id="tip">Drag a box around what you want to ask about · Enter or click = whole screen · Esc = cancel</div>
+  <script src="snip.js"></script>
+</body>
+</html>
