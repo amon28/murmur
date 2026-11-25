@@ -82,3 +82,6 @@ those three files; `scripts\release.ps1` does that with the GitHub sign-in git a
 Put the files of a llama.cpp Windows Vulkan x64 release (b9608) in `bin\llama` and a whisper.cpp Vulkan build of
 `whisper-server` in `bin\whisper`, each with `msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`.
 `bin\vad\silero_vad.onnx` (Silero VAD v5, MIT) is in git.
+
+## License
+MIT, see [LICENSE](LICENSE). The models and programs Murmur downloads or bundles keep their own licenses (listed in the app's About tab).

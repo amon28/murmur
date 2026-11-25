@@ -93,5 +93,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/amon28/murmur.git"
-  }
+  },
+  "license": "MIT"
 }
