@@ -7,8 +7,48 @@ let settings = {}
 let status = {}
 
 // ---------- light markdown (escaped first, so model text can never inject HTML) ----------
+// ---------- formatting ----------
+// Replies are Markdown (tables, lists, links, code with colours), with ```mermaid diagrams. Whatever the model writes is
+// cleaned by DOMPurify before it is shown: no scripts, no styles or ids that could reach the app, links open in the browser.
+const escHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const PURIFY = { FORBID_TAGS: ['style', 'form', 'textarea', 'select', 'option', 'img', 'video', 'audio', 'iframe', 'object', 'embed', 'link', 'meta', 'base'], FORBID_ATTR: ['style', 'id', 'name', 'target', 'srcset'] }
+let mdParser = null
+if (window.marked && window.DOMPurify) {
+  mdParser = new marked.Marked({ gfm: true, breaks: true })
+  mdParser.use({
+    renderer: {
+      code({ text, lang }) {
+        const l = String(lang || '').trim().split(/\s+/)[0].toLowerCase()
+        const raw = encodeURIComponent(text)
+        if (l === 'mermaid') return `<div class="diagram" data-raw="${raw}"><div class="code-bar"><span>diagram</span><button data-act="toggle">Code</button><button data-act="copy">Copy</button></div><pre class="hljs"><code>${escHtml(text)}</code></pre></div>`
+        let html = escHtml(text)
+        try { if (window.hljs) html = l && hljs.getLanguage(l) ? hljs.highlight(text, { language: l, ignoreIllegals: true }).value : text.length < 20000 ? hljs.highlightAuto(text).value : html } catch {}
+        const page = l === 'html' || /^\s*<(!doctype html|html)[\s>]/i.test(text)
+        return `<div class="codeblock" data-raw="${raw}"><div class="code-bar"><span>${escHtml(l || 'code')}</span>${page ? '<button data-act="preview" title="Open it in its own window: offline and sandboxed">Preview</button>' : ''}<button data-act="copy">Copy</button></div><pre class="hljs"><code>${html}</code></pre></div>`
+      },
+      link({ href, title, tokens }) {
+        const text = this.parser.parseInline(tokens)
+        return /^(https?:|mailto:)/i.test(href || '') ? `<a data-url="${escHtml(href)}"${title ? ` title="${escHtml(title)}"` : ''}>${text}</a>` : text
+      },
+    },
+  })
+  // inputs: only the read-only checkboxes of a task list (- [x])
+  DOMPurify.addHook('uponSanitizeElement', (n, d) => {
+    if (d.tagName === 'input' && (n.getAttribute('type') || '').toLowerCase() !== 'checkbox') n.remove()
+  })
+  // links in HTML the model wrote: also only to the browser
+  DOMPurify.addHook('afterSanitizeAttributes', (n) => {
+    if (n.tagName === 'INPUT') { n.setAttribute('disabled', ''); n.removeAttribute('value') }
+    if (n.tagName === 'A') { const h = n.getAttribute('href'); n.removeAttribute('href'); if (h && /^(https?:|mailto:)/i.test(h)) n.setAttribute('data-url', h) }
+  })
+}
 function md(text) {
-  const esc = String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  if (mdParser) { try { return DOMPurify.sanitize(mdParser.parse(String(text ?? '')), PURIFY) } catch {} }
+  return mdPlain(text)
+}
+// the plain formatter, if the libraries are missing
+function mdPlain(text) {
+  const esc = escHtml(text)
   return esc
     .replace(/```([\s\S]*?)```/g, (_, c) => `<code style="display:block;white-space:pre;overflow-x:auto;background:var(--panel2);padding:6px 8px;border-radius:6px">${c.replace(/^\w*\n/, '')}</code>`)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
@@ -16,6 +56,45 @@ function md(text) {
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
     .replace(/^#{1,4}\s+(.*)$/gm, '<b>$1</b>')
     .replace(/^\s*[-*]\s+/gm, '• ')
+}
+
+// Mermaid (5 MB) loads the first time a diagram is shown
+let mermaidP = null, diagramN = 0
+function loadMermaid() {
+  return (mermaidP ||= new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = 'vendor/mermaid.min.js'
+    s.onload = () => { mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict', fontFamily: 'inherit' }); res(mermaid) }
+    s.onerror = () => { mermaidP = null; rej(new Error('mermaid missing')) }
+    document.head.append(s)
+  }))
+}
+async function drawDiagrams(root) {
+  const boxes = [...root.querySelectorAll('.diagram:not([data-done])')]
+  if (!boxes.length) return
+  let mm; try { mm = await loadMermaid() } catch { return }
+  for (const d of boxes) {
+    d.dataset.done = '1'
+    const id = 'mmd' + ++diagramN
+    try {
+      const { svg } = await mm.render(id, decodeURIComponent(d.dataset.raw))
+      const fig = el('div', 'diagram-svg'); fig.innerHTML = svg
+      d.insertBefore(fig, d.querySelector('pre')); d.classList.add('drawn')
+    } catch (e) {
+      document.getElementById('d' + id)?.remove(); document.getElementById(id)?.remove() // mermaid's own error drawing
+      d.querySelector('.code-bar span').textContent = "diagram (couldn't be drawn)"
+    }
+  }
+}
+// buttons on code and diagrams, and links: the same in the chat and in What's new
+function onRichClick(e) {
+  const a = e.target.closest('a')
+  if (a) { e.preventDefault(); if (a.dataset.url) M.openUrl(a.dataset.url); return }
+  const b = e.target.closest('[data-act]'), box = b?.closest('.codeblock, .diagram')
+  if (!box) return
+  const raw = decodeURIComponent(box.dataset.raw || '')
+  if (b.dataset.act === 'copy') { navigator.clipboard.writeText(raw); b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1200) }
+  else if (b.dataset.act === 'preview') M.previewHtml(raw)
+  else if (b.dataset.act === 'toggle') { box.classList.toggle('show-code'); b.textContent = box.classList.contains('show-code') ? 'Diagram' : 'Code' }
 }
 
 // ---------- status dots ----------
@@ -33,6 +112,7 @@ M.status().then(paintStatus)
 
 // ---------- chat ----------
 const chatBox = $('#chat')
+chatBox.addEventListener('click', onRichClick)
 let streaming = null
 
 function scrollDown() { chatBox.scrollTop = chatBox.scrollHeight }
@@ -44,14 +124,20 @@ function showEmpty() {
 }
 function addMsg(role, text, extra = {}) {
   chatBox.querySelector('.empty')?.remove()
-  const m = el('div', `msg ${role}`)
-  if (extra.attachments?.length) m.append(attsFor(extra.attachments))
-  if (extra.thinking) m.append(thoughtBox(extra.thinking, extra.thoughtMs))
-  const body = el('div', 'body'); body.innerHTML = md(text); m.append(body)
+  // a message: its bubble, and under it a row with ‹ 2/3 ›, its buttons and the time
+  const m = el('div', `msg ${role}`), bub = el('div', 'bubble'); m.append(bub)
+  m._raw = text; m._atts = extra.attachments
+  if (extra.attachments?.length) bub.append(attsFor(extra.attachments))
+  if (extra.thinking) bub.append(thoughtBox(extra.thinking, extra.thoughtMs))
+  const body = el('div', 'body'); body.innerHTML = md(text); bub.append(body); drawDiagrams(body)
   if (!text && extra.attachments?.length) body.hidden = true
-  if (extra.recalled?.length || extra.saved?.length || extra.sources?.length || extra.chats?.length) m.append(chipsFor(extra))
+  if (extra.recalled?.length || extra.saved?.length || extra.sources?.length || extra.chats?.length) bub.append(chipsFor(extra))
   if (extra.rating) m.dataset.rating = extra.rating
-  if (role === 'assistant' && text) m.append(actionsFor(m, () => body.innerText, extra.at))
+  if (extra.at) m.dataset.at = extra.at
+  if (extra.fork) setBranch(m, { n: extra.fork.tails.length, k: extra.fork.at })
+  if (role === 'assistant' && text) footFor(m).append(actionsFor(m, () => body.innerText, extra.at))
+  if (role === 'user') footFor(m).append(userActions(m))
+  if (role !== 'system') setTime(m)
   chatBox.append(m); scrollDown()
   return m
 }
@@ -73,37 +159,197 @@ function attsFor(list) {
   return box
 }
 function showImage(src) { const v = el('div', 'viewer'); const i = el('img'); i.src = src; v.append(i); v.onclick = () => v.remove(); document.body.append(v) }
-function chipsFor({ recalled = [], saved = [], sources = [], chats = [] }) {
+function chipsFor({ recalled = [], saved = [], sources = [], chats = [], at }) {
   const c = el('div', 'chips')
   for (const p of chats) { const b = el('button', 'chip', '💬 ' + p.title); b.title = 'Remembered from this conversation (click to open it)'; b.onclick = () => openConv(p.conv); c.append(b) }
   for (const r of recalled) { const b = el('button', 'chip', '📎 ' + r.title); b.title = 'Used this note'; b.onclick = () => openNote(r.id); c.append(b) }
-  for (const s of saved) { const b = el('button', 'chip saved', (s.remind ? `⏰ Reminder ${whenFull(s.remind)}: ` : s.added ? '✓ Added to: ' : '✓ Saved: ') + s.title); b.onclick = () => openNote(s.id); c.append(b) }
+  for (const s of saved) c.append(savedChip(s, at))
   for (const s of sources) {
     let host = s.url; try { host = new URL(s.url).hostname.replace(/^www\./, '') } catch {}
     const b = el('button', 'chip src', '🌐 ' + host); b.title = s.title + '\n' + s.url; b.onclick = () => M.openUrl(s.url); c.append(b)
   }
   return c
 }
+// a saved note, with Undo (a new note goes to the trash; added text comes off the note again)
+function savedChip(s, at, onUndo) {
+  const g = el('span', 'chip-group')
+  const b = el('button', 'chip saved', (s.remind ? `⏰ Reminder ${whenFull(s.remind)}: ` : s.added ? '✓ Added to: ' : '✓ Saved: ') + s.title)
+  b.onclick = () => openNote(s.id)
+  const u = el('button', 'chip undo', 'Undo')
+  u.title = s.added ? 'Take the added text off the note again' : 'Remove this note (it goes to the trash)'
+  const done = () => { g.classList.add('undone'); b.disabled = true; u.remove(); g.append(el('span', 'chip undone-label', 'undone')) }
+  u.onclick = async () => {
+    const ok = await M.notes.undo({ id: s.id, addedText: s.added ? s.addedText : undefined, conv: at ? convId : undefined, at })
+    if (ok) { done(); onUndo?.(); if (drawerOpen) renderNotes() } else { u.textContent = s.added ? "Can't: the note changed" : "Can't: already gone"; u.disabled = true }
+  }
+  g.append(b)
+  if (s.undone) done(); else if (!s.added || s.addedText) g.append(u)
+  return g
+}
+// small line icons for the row under a message
+const ICONS = {
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  check: '<path d="M5 12l5 5 9-10"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+  regen: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>',
+  speak: '<path d="M4 10v4h4l5 4V6L8 10z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  note: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/>',
+  up: '<path d="M7 11v9H4v-9zM7 11l4-7c1.5 0 2.5 1 2.2 2.6L12.6 10H19a2 2 0 0 1 2 2.3l-1.2 6A2 2 0 0 1 17.8 20H7"/>',
+  down: '<path d="M7 13V4H4v9zM7 13l4 7c1.5 0 2.5-1 2.2-2.6L12.6 14H19a2 2 0 0 0 2-2.3l-1.2-6A2 2 0 0 0 17.8 4H7"/>',
+  prev: '<path d="M15 6l-6 6 6 6"/>', next: '<path d="M9 6l6 6-6 6"/>',
+}
+function iconBtn(name, title, onclick) {
+  const b = el('button', 'ib'); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title)
+  b.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`
+  if (onclick) b.onclick = onclick
+  return b
+}
+const setIcon = (b, name) => { b.querySelector('svg').innerHTML = ICONS[name] }
+function copyBtn(getText) {
+  const b = iconBtn('copy', 'Copy', () => { navigator.clipboard.writeText(getText()); setIcon(b, 'check'); b.title = 'Copied'; setTimeout(() => { setIcon(b, 'copy'); b.title = 'Copy' }, 1200) })
+  return b
+}
 function actionsFor(m, getText, at) {
   const a = el('div', 'msg-actions')
+  a.append(copyBtn(getText), regenButton(m), speakBtn(m))
+  const save = iconBtn('note', 'Save as note', async () => {
+    const n = await M.notes.create({ text: getText(), source: 'chat' })
+    setIcon(save, 'check'); save.title = 'Saved as a note'; save.disabled = true
+    m.querySelector('.chips') || beforeFoot(m, el('div', 'chips'))
+    m.querySelector('.chips').append(savedChip(n, null, () => { setIcon(save, 'note'); save.title = 'Save as note'; save.disabled = false }))
+  })
+  a.append(save)
   // 👍/👎 teach Murmur what this user likes (see the You tab)
   if (at) {
     const conv = convId
-    const up = el('button', 'rate', '👍'), down = el('button', 'rate', '👎')
+    const up = iconBtn('up', 'Good reply: more like this'), down = iconBtn('down', 'Not good: less like this')
+    up.classList.add('rate'); down.classList.add('rate')
     const rate = (v, b) => async () => {
       const now = b.classList.contains('on') ? 0 : v
       await M.chat.rate(conv, at, now)
       up.classList.toggle('on', now === 1); down.classList.toggle('on', now === -1)
     }
-    up.title = 'Good reply: more like this'; down.title = 'Not good: less like this'
     up.onclick = rate(1, up); down.onclick = rate(-1, down)
     const r = m.dataset.rating; if (r === '1') up.classList.add('on'); if (r === '-1') down.classList.add('on')
     a.append(up, down)
   }
-  const copy = el('button', '', 'Copy'); copy.onclick = () => { navigator.clipboard.writeText(getText()); copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = 'Copy'), 1200) }
-  const save = el('button', '', 'Save as note'); save.onclick = async () => { const n = await M.notes.create({ text: getText(), source: 'chat' }); save.textContent = 'Saved'; save.disabled = true; m.querySelector('.chips') || m.insertBefore(el('div', 'chips'), a); m.querySelector('.chips').append(chipsFor({ saved: [n] }).firstChild) }
-  a.append(copy, save)
   return a
+}
+
+// ---------- reading aloud ----------
+// The Windows voices, through the browser's speech: offline. One message at a time; its button turns into Stop.
+let speaking = null
+function speakable(m) {
+  const b = m.querySelector('.bubble > .body')?.cloneNode(true)
+  if (!b) return ''
+  b.querySelectorAll('.codeblock, .diagram, .code-bar').forEach((x) => x.replaceWith(' (code) '))
+  return b.innerText.replace(/\s+\n/g, '\n').trim()
+}
+function stopSpeaking() {
+  if (!speaking) return
+  speechSynthesis.cancel()
+  setIcon(speaking.btn, 'speak'); speaking.btn.title = 'Read aloud'; speaking.btn.classList.remove('on')
+  speaking = null
+}
+function speakBtn(m) {
+  const b = iconBtn('speak', 'Read aloud', () => {
+    if (speaking?.btn === b) return stopSpeaking()
+    stopSpeaking()
+    const text = speakable(m); if (!text || !window.speechSynthesis) return
+    const u = new SpeechSynthesisUtterance(text)
+    const voice = speechSynthesis.getVoices().find((v) => v.default) // Windows' own default voice
+    if (voice) u.voice = voice
+    u.onend = u.onerror = () => { if (speaking?.u === u) stopSpeaking() }
+    speaking = { btn: b, u }
+    setIcon(b, 'stop'); b.title = 'Stop reading'; b.classList.add('on')
+    speechSynthesis.speak(u)
+  })
+  return b
+}
+
+// ---------- the time under a message ----------
+function timeText(at) {
+  const d = new Date(at), now = new Date()
+  const t = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return t
+  const y = new Date(now); y.setDate(now.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return 'Yesterday ' + t
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) }) + ', ' + t
+}
+function setTime(m) {
+  const f = footFor(m)
+  let t = f.querySelector('.time')
+  if (!t) { t = el('span', 'time'); f.append(t) }
+  const at = Number(m.dataset.at) || Date.now()
+  t.textContent = timeText(at); t.title = new Date(at).toLocaleString()
+}
+
+// ---------- branches ----------
+// Under a message: ‹ 2/3 › where the conversation branches, its buttons, and the time.
+function regenOnly(m) { const a = el('div', 'msg-actions'); a.append(regenButton(m)); return a }
+function footFor(m) {
+  let f = m.querySelector(':scope > .msg-foot')
+  if (!f) { f = el('div', 'msg-foot'); m.append(f) }
+  return f
+}
+// into the bubble, after what is there (chips, "stopped")
+function beforeFoot(m, node) { (m.querySelector(':scope > .bubble') || m).append(node) }
+const busyNow = () => !!streaming
+function setBranch(m, { n, k }) {
+  const f = footFor(m)
+  f.querySelector('.branch')?.remove()
+  if (!(n > 1)) return
+  const nav = el('div', 'branch')
+  const go = (to) => async () => {
+    if (busyNow() || !m.dataset.at) return
+    const pos = [...chatBox.querySelectorAll('.msg.user, .msg.assistant')].indexOf(m)
+    stopSpeaking()
+    showConv(await M.chat.branch(convId, Number(m.dataset.at), to))
+    const again = chatBox.querySelectorAll('.msg.user, .msg.assistant')[pos]
+    if (again) { chatBox.style.scrollBehavior = 'auto'; again.scrollIntoView({ block: 'nearest' }); chatBox.style.scrollBehavior = '' }
+  }
+  const prev = iconBtn('prev', 'Previous version', go(k - 1)), next = iconBtn('next', 'Next version', go(k + 1))
+  prev.disabled = k <= 0; next.disabled = k >= n - 1
+  nav.append(prev, el('span', '', `${k + 1}/${n}`), next)
+  f.prepend(nav)
+}
+// everything from this message on leaves the screen: it stays in the old branch
+function dropFrom(m) { stopSpeaking(); while (m.nextSibling) m.nextSibling.remove(); m.remove() }
+function regenButton(m) {
+  return iconBtn('regen', 'Regenerate: write this reply again (the old one stays, switch with ‹ ›)', () => {
+    if (busyNow() || !m.dataset.at) return
+    const at = Number(m.dataset.at); dropFrom(m)
+    M.chat.send({ regenAt: at }).then((r) => { if (r === null) loadHistory() })
+  })
+}
+function userActions(m) {
+  const a = el('div', 'msg-actions')
+  a.append(copyBtn(() => m._raw || ''), iconBtn('edit', 'Edit: change this message and send it again (the old version stays, switch with ‹ ›)', () => editMsg(m)))
+  return a
+}
+function editMsg(m) {
+  if (busyNow() || !m.dataset.at || m.classList.contains('editing')) return
+  const body = m.querySelector('.bubble > .body')
+  m.classList.add('editing')
+  const box = el('div', 'edit-box'), ta = el('textarea'); ta.value = m._raw || ''; ta.rows = Math.min(10, Math.max(2, ta.value.split('\n').length + 1))
+  const row = el('div', 'edit-row'), cancel = el('button', 'ghost small', 'Cancel'), go = el('button', 'primary small', 'Send')
+  row.append(cancel, go); box.append(ta, row)
+  body.hidden = true; body.parentNode.insertBefore(box, body)
+  const close = () => { box.remove(); body.hidden = false; m.classList.remove('editing') }
+  const send = () => {
+    const text = ta.value.trim()
+    if (!text && !m._atts?.length) return
+    if (busyNow()) return
+    if (text === String(m._raw || '').trim()) return close()
+    const at = Number(m.dataset.at), atts = m._atts
+    dropFrom(m)
+    addMsg('user', text, { attachments: atts })
+    M.chat.send({ text, editAt: at }).then((r) => { if (r === null) loadHistory() })
+  }
+  cancel.onclick = close; go.onclick = send
+  ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } else if (e.key === 'Escape') close() }
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length)
 }
 
 let convId = null
@@ -113,14 +359,49 @@ function showConv(c) {
   chatBox.innerHTML = ''
   for (const m of c.messages.slice(-80)) {
     // a turn that was stopped before any words, or failed, is kept in the file but shown as such
-    if (m.role === 'assistant' && m.error && !m.content) { const x = addMsg('assistant', ''); x.classList.add('error'); x.querySelector('.body').textContent = '⚠ ' + m.error; continue }
+    if (m.role === 'assistant' && !m.content && (m.error || m.fork)) {
+      const x = addMsg('assistant', '', m)
+      if (m.error) { x.classList.add('error'); x.querySelector('.body').textContent = '⚠ ' + m.error } else x.querySelector('.body').textContent = '(stopped)'
+      footFor(x).append(regenOnly(x)); continue
+    }
     if (m.role === 'assistant' && !m.content) continue
     const x = addMsg(m.role, m.content, m)
-    if (m.stopped) x.append(el('div', 'muted small-text', 'stopped'))
+    if (m.stopped) beforeFoot(x, el('div', 'muted small-text', 'stopped'))
   }
   $('#convTitle').textContent = c.messages.length ? c.title : ''
   showEmpty()
+  showContext(c.context)
   chatBox.scrollTop = chatBox.scrollHeight
+}
+
+// How full this conversation's context is (from the last reply), in the title bar; and a line in the chat above
+// which the model no longer sees the messages (Murmur drops the oldest ones when it fills up).
+// a context size is a power-of-two count (16,384 = "16k"), what was used a plain one (1,529 = "1.5k")
+const kCtx = (n) => (n % 1024 === 0 ? n / 1024 + 'k' : kTok(n))
+const kTok = (n) => (n >= 100000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n))
+function showContext(ctx) {
+  const box = $('#ctx')
+  chatBox.querySelector('.trim-line')?.remove()
+  chatBox.querySelectorAll('.msg.unseen').forEach((m) => m.classList.remove('unseen'))
+  if (!ctx || !(ctx.read >= 0)) { box.hidden = true; return }
+  const used = ctx.read + (ctx.wrote || 0), size = ctx.size || 0
+  const pct = size ? Math.min(100, Math.round((used / size) * 100)) : 0
+  // messages from before the window: faded, with the line above the first one still seen
+  const msgs = [...chatBox.querySelectorAll('.msg.user[data-at], .msg.assistant[data-at]')]
+  const hidden = ctx.from ? msgs.filter((m) => Number(m.dataset.at) < ctx.from) : []
+  const first = ctx.from ? msgs.find((m) => Number(m.dataset.at) >= ctx.from) : null
+  if (hidden.length) {
+    hidden.forEach((m) => m.classList.add('unseen'))
+    const line = el('div', 'trim-line', 'Murmur no longer shows the model the messages above this line')
+    line.title = 'The conversation outgrew the context, so its oldest messages are left out. Start a new conversation, or save what matters as a note.'
+    chatBox.insertBefore(line, first || null)
+  }
+  box.hidden = false
+  box.className = 'ctx' + (pct >= 90 ? ' full' : pct >= 70 ? ' high' : '')
+  box.style.setProperty('--p', size ? pct : 0)
+  box.title = `Context: ${kTok(used)}${size ? ` / ${kCtx(size)} (${pct}%)` : ''}\n${used.toLocaleString()}${size ? ` of ${size.toLocaleString()}` : ''} tokens\n` +
+    `Last reply: the model read ${ctx.read.toLocaleString()} (instructions, this chat, notes, files) and wrote ${(ctx.wrote || 0).toLocaleString()}.\n` +
+    (hidden.length ? `${hidden.length} older message${hidden.length > 1 ? 's are' : ' is'} no longer seen (above the line in the chat). Murmur keeps room for the reply and trims in steps, so this happens before 100%.` : 'When it fills up, the oldest messages are left out, never the newest.')
 }
 async function loadHistory() { showConv(await M.chat.history()) }
 async function openConv(id) { showConv(await M.chat.open(id)) }
@@ -142,11 +423,15 @@ async function sendChat(text) {
   pending = []; renderTray(); setWeb(false)
   M.chat.send({ text, attachments, web })
 }
-M.chat.onStart(({ cut, conv }) => {
+M.chat.onStart(({ cut, conv, userAt, userFork, replyFork }) => {
   if (conv !== convId) return
+  const mine = [...chatBox.querySelectorAll('.msg.user')].at(-1); if (mine && userAt && !mine.dataset.at) mine.dataset.at = userAt
+  if (mine && userFork) setBranch(mine, userFork)
+  if (mine && userAt) setTime(mine)
   // files too long to read whole: say how much the model reads
   for (const f of cut || []) addMsg('system', `📄 ${f.name} is long: Murmur reads the first ${f.kept.toLocaleString()} of ${f.total.toLocaleString()} characters.`)
   const m = addMsg('assistant', '')
+  if (replyFork) setBranch(m, replyFork)
   const body = m.querySelector('.body'); body.classList.add('typing')
   streaming = { m, body, text: '', recalled: [], chats: [] }
   setSendMode(true)
@@ -168,12 +453,12 @@ M.chat.onToken(({ t, conv }) => {
 })
 M.chat.onThink(({ t, conv }) => {
   if (!streaming || conv !== convId) return
-  if (!streaming.thought) { streaming.thought = thoughtBox('', 0); streaming.m.insertBefore(streaming.thought, streaming.body) }
+  if (!streaming.thought) { streaming.thought = thoughtBox('', 0); streaming.body.parentNode.insertBefore(streaming.thought, streaming.body) }
   const box = streaming.thought.querySelector('.thought-text'); box.textContent += t
   if (streaming.thought.open) box.scrollTop = box.scrollHeight
   scrollDown()
 })
-M.chat.onDone(({ at, thoughtMs, text, saved, sources, error, conv, ...rest }) => {
+M.chat.onDone(({ at, thoughtMs, text, saved, sources, error, conv, context, ...rest }) => {
   if (!streaming || conv !== convId) return
   const { m, body, thought } = streaming
   const recalled = rest.recalled || streaming.recalled, chats = rest.chats || streaming.chats
@@ -183,13 +468,19 @@ M.chat.onDone(({ at, thoughtMs, text, saved, sources, error, conv, ...rest }) =>
   setSendMode(false)
   body.classList.remove('typing')
   if (error) {
-    if (error === 'stopped') { if (!body.textContent) m.remove(); else { body.innerHTML = md(text || body.innerText); m.append(el('div', 'muted small-text', 'stopped')) } }
+    // stopped with nothing written: gone, unless it is a branch (its arrows stay, so the other versions can be reached)
+    if (error === 'stopped') { if (!body.textContent && !m.querySelector('.branch')) { m.remove(); return } if (body.textContent) { body.innerHTML = md(text || body.innerText); beforeFoot(m, el('div', 'muted small-text', 'stopped')) } else body.textContent = '(stopped)' }
     else { m.classList.add('error'); body.textContent = '⚠ ' + error }
+    if (at) { m.dataset.at = at; setTime(m) }
+    footFor(m).append(regenOnly(m))
     return
   }
-  body.innerHTML = md(text || '(no answer)')
-  if (recalled?.length || saved?.length || sources?.length || chats?.length) m.append(chipsFor({ recalled, saved, sources, chats }))
-  m.append(actionsFor(m, () => body.innerText, at))
+  body.innerHTML = md(text || '(no answer)'); drawDiagrams(body)
+  if (recalled?.length || saved?.length || sources?.length || chats?.length) beforeFoot(m, chipsFor({ recalled, saved, sources, chats, at }))
+  m._raw = text
+  if (at) { m.dataset.at = at; setTime(m) }
+  footFor(m).append(actionsFor(m, () => body.innerText, at))
+  if (context) showContext(context)
   scrollDown()
   if (saved?.length && drawerOpen) renderNotes()
 })
@@ -198,7 +489,12 @@ const input = $('#input')
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px' }
 input.addEventListener('input', autosize)
 input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } })
-function submit() { if (streaming && !input.value.trim() && !pending.length) return M.chat.stop(); const t = input.value; input.value = ''; autosize(); sendChat(t) }
+function submit() {
+  if (streaming && !input.value.trim() && !pending.length) return M.chat.stop()
+  const t = input.value
+  if (t.trimStart().startsWith('/') && runSlash(t)) return
+  input.value = ''; autosize(); sendChat(t)
+}
 $('#send').onclick = submit
 function setSendMode(busy) {
   $('#send').title = busy ? 'Stop' : 'Send'
@@ -207,6 +503,118 @@ function setSendMode(busy) {
 async function newConv() { await M.chat.create(); await loadHistory(); input.focus() }
 $('#newChat').onclick = newConv
 $('#convTitle').onclick = () => openDrawer('chats')
+
+// ---------- / commands and snippets ----------
+// Typed at the start of the box. A list pops up while the name is typed (↑↓, Enter or Tab, Esc); Enter on a full line
+// ("/web weather today") runs it. Snippets are the user's own prompts (Settings › Snippets).
+const lastOf = (sel) => [...chatBox.querySelectorAll(sel)].at(-1)
+const notice = (t) => addMsg('system', t)
+const COMMANDS = [
+  { name: 'new', hint: 'Start a new conversation', run: () => newConv() },
+  { name: 'web', args: 'question', hint: 'Search the web for this message', run: (a) => { if (!a) return 'keep'; setWeb(true); sendChat(a) } },
+  { name: 'note', args: 'text', hint: 'Save it as a note, without a reply', run: async (a) => {
+    if (!a) return 'keep'
+    const n = await M.notes.create({ text: a, source: 'typed' })
+    const m = addMsg('system', ''); m.querySelector('.body').replaceChildren(savedChip(n))
+    if (drawerOpen) renderNotes()
+  } },
+  { name: 'remind', args: 'when, what', hint: 'Set a reminder ("tomorrow 9am call mom")', run: (a) => { if (!a) return 'keep'; sendChat('Remind me ' + a) } },
+  { name: 'notes', args: 'search', hint: 'Open your notes, or search them', run: (a) => { openDrawer('notes'); $('#noteSearch').value = a; renderNotes() } },
+  { name: 'chats', args: 'search', hint: 'Find a conversation', run: (a) => { openDrawer('chats'); $('#chatSearch').value = a; renderChats() } },
+  { name: 'regen', hint: 'Write the last reply again', run: () => { const b = lastOf('.msg.assistant')?.querySelector('.ib[title^="Regenerate"]'); b ? b.click() : notice('No reply to write again yet.') } },
+  { name: 'edit', hint: 'Edit your last message', run: () => { const m = lastOf('.msg.user'); m ? editMsg(m) : notice('No message to edit yet.') } },
+  { name: 'copy', hint: 'Copy the last reply', run: () => { const m = lastOf('.msg.assistant'); if (m) navigator.clipboard.writeText(m._raw || m.querySelector('.body').innerText) } },
+  { name: 'read', hint: 'Read the last reply aloud', run: () => lastOf('.msg.assistant')?.querySelector('.ib[title="Read aloud"]')?.click() },
+  { name: 'stop', hint: 'Stop the reply, or the reading', run: () => { stopSpeaking(); if (streaming) M.chat.stop() } },
+  { name: 'think', args: 'on | off', hint: 'Think before answering (better on hard questions, slower)', run: async (a) => {
+    const on = /^(on|yes|1|true)$/i.test(a) ? true : /^(off|no|0|false)$/i.test(a) ? false : !settings.thinking
+    settings = await M.settings.set({ thinking: on }); notice(`Thinking before answering: ${on ? 'on' : 'off'}.`)
+  } },
+  { name: 'snippets', hint: 'Make and change your snippets', run: () => { subTab = 'snippets'; openDrawer('settings') } },
+  { name: 'settings', hint: 'Open Settings', run: () => openDrawer('settings') },
+  { name: 'help', hint: 'All commands and snippets', run: () => {
+    const sn = settings.snippets || []
+    notice('**Commands**\n' + COMMANDS.map((c) => `\`/${c.name}${c.args ? ' ' + c.args : ''}\`: ${c.hint}`).join('\n') +
+      (sn.length ? '\n\n**Your snippets**\n' + sn.map((x) => `\`/${x.name}\`: ${x.text.replace(/\s+/g, ' ').slice(0, 70)}`).join('\n') : '') +
+      '\n\nMake your own in Settings › Snippets.')
+  } },
+]
+const snippets = () => (settings.snippets || []).filter((x) => x?.name && x.text)
+async function expandSnippet(sn, typed) {
+  let text = sn.text
+  if (/\{\{text\}\}/.test(text) && !typed) typed = (await M.clipboardText().catch(() => '')) || ''
+  if (/\{\{clipboard\}\}/.test(text)) text = text.replace(/\{\{clipboard\}\}/g, (await M.clipboardText().catch(() => '')) || '')
+  const now = new Date()
+  text = text.replace(/\{\{date\}\}/g, now.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }))
+    .replace(/\{\{time\}\}/g, now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))
+  text = /\{\{text\}\}/.test(text) ? text.replace(/\{\{text\}\}/g, typed) : typed ? `${text}\n\n${typed}` : text
+  return text
+}
+// puts the snippet in the box (caret at {{cursor}}), or sends it
+async function useSnippet(sn, typed, send) {
+  const full = await expandSnippet(sn, typed)
+  const at = full.indexOf('{{cursor}}'), text = full.replace('{{cursor}}', '')
+  if (send && at < 0) { input.value = ''; autosize(); sendChat(text); return }
+  input.value = text; autosize(); input.focus()
+  const pos = at < 0 ? text.length : at; input.setSelectionRange(pos, pos)
+}
+// a whole line typed and sent: true when it was a command or snippet
+function runSlash(line) {
+  const m = line.trim().match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/)
+  if (!m) return false
+  const name = m[1].toLowerCase(), arg = (m[2] || '').trim()
+  const cmd = COMMANDS.find((c) => c.name === name), sn = !cmd && snippets().find((x) => x.name.toLowerCase() === name)
+  if (!cmd && !sn) return false // not one of ours: sent as it is
+  closePalette()
+  if (sn) { useSnippet(sn, arg, true); return true }
+  input.value = ''; autosize()
+  Promise.resolve(cmd.run(arg)).then((r) => { if (r === 'keep') { input.value = `/${cmd.name} `; autosize(); input.focus() } })
+  return true
+}
+// the list above the box
+const palette = el('div', 'palette'); palette.hidden = true; palette.setAttribute('role', 'listbox')
+$('.composer').append(palette)
+let palItems = [], palSel = 0
+function closePalette() { palette.hidden = true; palItems = [] }
+function updatePalette() {
+  const m = input.value.match(/^\/([\w-]*)$/)
+  if (!m) return closePalette()
+  const q = m[1].toLowerCase()
+  const all = [...COMMANDS.map((c) => ({ kind: 'cmd', name: c.name, args: c.args, hint: c.hint, c })),
+    ...snippets().map((x) => ({ kind: 'snip', name: x.name, hint: x.text.replace(/\{\{\w+\}\}/g, '…').replace(/\s+/g, ' ').slice(0, 60), x }))]
+  palItems = [...all.filter((i) => i.name.startsWith(q)), ...all.filter((i) => !i.name.startsWith(q) && i.name.includes(q))]
+  if (!palItems.length) return closePalette()
+  palSel = Math.min(palSel, palItems.length - 1)
+  palette.replaceChildren(...palItems.map((i, k) => {
+    const row = el('div', 'pal-row' + (k === palSel ? ' sel' : '')); row.setAttribute('role', 'option')
+    row.append(el('b', '', '/' + i.name), el('span', 'pal-args', i.args || ''), el('span', 'pal-hint', i.hint), el('span', 'pal-kind', i.kind === 'snip' ? 'snippet' : ''))
+    row.onmousedown = (e) => { e.preventDefault(); palSel = k; choosePalette() }
+    return row
+  }))
+  palette.hidden = false
+  palette.querySelector('.sel')?.scrollIntoView({ block: 'nearest' })
+}
+function choosePalette() {
+  const i = palItems[palSel]; if (!i) return
+  closePalette()
+  if (i.kind === 'snip') {
+    if (/\{\{text\}\}/.test(i.x.text)) { input.value = `/${i.name} `; autosize(); return } // waits for the text
+    return useSnippet(i.x, '', i.x.send)
+  }
+  if (i.args) { input.value = `/${i.name} `; autosize(); return }
+  input.value = ''; autosize(); i.c.run('')
+}
+input.addEventListener('input', () => { palSel = 0; updatePalette() })
+input.addEventListener('keydown', (e) => {
+  if (palette.hidden) return
+  const n = palItems.length
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { palSel = (palSel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; updatePalette() }
+  else if (e.key === 'Enter' || e.key === 'Tab') { if (e.shiftKey) return; choosePalette() }
+  else if (e.key === 'Escape') closePalette()
+  else return
+  e.preventDefault(); e.stopImmediatePropagation()
+}, true)
+input.addEventListener('blur', () => setTimeout(closePalette, 150))
 
 // ---------- web search button ----------
 let webOn = false
@@ -466,7 +874,7 @@ async function endDictation(cancel) {
   const transcript = d.parts.join(' ').trim()
   const note = transcript ? await M.notes.fromDictation(transcript) : null
   $('#dictation').hidden = true; $('#dictStop').disabled = false; $('#dictStop').textContent = 'Save note'
-  if (note) { const m = addMsg('system', `Note saved: ${note.title}`); m.style.cursor = 'pointer'; m.onclick = () => openNote(note.id) }
+  if (note) { const m = addMsg('system', ''); m.querySelector('.body').replaceChildren(savedChip(note)) }
   else addMsg('system', 'Nothing was heard, so no note was saved.')
 }
 $('#dictate').onclick = () => (dict ? endDictation(false) : startDictation())
@@ -833,7 +1241,7 @@ async function showChangelog(all) {
   list.forEach((e, i) => {
     const sec = el('details', 'news-ver'); sec.open = i === 0 || (!all && !!since)
     const sum = el('summary'); sum.append(el('b', '', e.version), el('span', 'muted small-text', e.date ? ' · ' + e.date : ''))
-    const body = el('div', 'news-text'); body.innerHTML = md(e.body)
+    const body = el('div', 'news-text body'); body.innerHTML = md(e.body)
     sec.append(sum, body); box.append(sec)
   })
   $('#news').hidden = false
@@ -842,6 +1250,7 @@ async function showChangelog(all) {
 const older = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); return false }
 $('#newsClose').onclick = () => { $('#news').hidden = true; input.focus() }
 $('#news').addEventListener('click', (e) => { if (e.target.id === 'news') $('#news').hidden = true })
+$('#news').addEventListener('click', onRichClick)
 M.changelog.onShow(({ all }) => showChangelog(all))
 
 // ---------- updates ----------
@@ -907,7 +1316,7 @@ const FIELDS = [
   ]],
 ]
 // The sub-tabs along the top of Settings. All of them stay in one form, so Save keeps every setting.
-const SUBTABS = [['chat', 'Chat'], ['listen', 'Listening'], ['memory', 'Memory'], ['app', 'App']]
+const SUBTABS = [['chat', 'Chat'], ['listen', 'Listening'], ['memory', 'Memory'], ['snippets', 'Snippets'], ['app', 'App']]
 let subTab = 'chat'
 let found = { whisper: [], llm: [] }
 async function renderSettings() {
@@ -965,6 +1374,7 @@ async function renderSettings() {
     }
     form.append(fs)
   }
+  form.append(snippetEditor())
   const hint = el('div', 'hint', 'Changing a model or path restarts only that part. Tip: if another app on this PC already serves the same model (LM Studio, Ollama, another llama-server), pick "Another OpenAI-compatible server" and give its address, to share it instead of loading a second copy.'); hint.dataset.sub = 'chat'; form.append(hint)
   const mode = form.querySelector('[name=llmMode]')
   const sync = () => form.querySelectorAll('label[data-when]').forEach((l) => { l.hidden = !!l.dataset.when && l.dataset.when !== mode.value })
@@ -978,10 +1388,48 @@ $('#settingsSave').onclick = async () => {
     const t = inp.dataset.type
     next[inp.name] = t === 'check' ? inp.checked : t === 'number' ? Number(inp.value) : inp.value
   }
+  const sn = readSnippets()
+  if (sn.error) { $('#settingsSave').textContent = sn.error; setTimeout(() => ($('#settingsSave').textContent = 'Save'), 2500); return }
+  next.snippets = sn.list
   settings = await M.settings.set(next)
   $('#settingsSave').textContent = 'Saved'; setTimeout(() => ($('#settingsSave').textContent = 'Save'), 1000)
 }
 $('#openData').onclick = () => M.settings.openData()
+// Settings › Snippets: one row per snippet. Its fields have no name, so the form's own loop leaves them to readSnippets.
+function snippetEditor() {
+  const fs = el('fieldset', 'snippets'); fs.dataset.sub = 'snippets'
+  fs.append(el('legend', '', 'Snippets'))
+  fs.append(el('div', 'hint', 'Type / and the name in the chat. {{text}} is what you type after the name (or the clipboard, if nothing), {{clipboard}}, {{date}} and {{time}} are filled in, {{cursor}} is where typing goes on.'))
+  const list = el('div', 'snip-list')
+  const row = (x = { name: '', text: '', send: true }) => {
+    const r = el('div', 'snip-row')
+    const name = el('input'); name.placeholder = 'name'; name.value = x.name; name.dataset.snip = 'name'
+    const text = el('textarea'); text.rows = 3; text.placeholder = 'The prompt, e.g. Summarize this:\n\n{{text}}'; text.value = x.text; text.dataset.snip = 'text'
+    const send = el('label', 'check'); const cb = el('input'); cb.type = 'checkbox'; cb.checked = x.send !== false; cb.dataset.snip = 'send'
+    send.append(cb, el('span', '', 'Send right away'))
+    const del = el('button', 'ghost small', 'Delete'); del.type = 'button'; del.onclick = () => r.remove()
+    const top = el('div', 'snip-top'); top.append(el('span', 'slash', '/'), name, send, del)
+    r.append(top, text); list.append(r)
+    return r
+  }
+  for (const x of settings.snippets || []) row(x)
+  const add = el('button', 'ghost small', '+ Add snippet'); add.type = 'button'; add.onclick = () => row().querySelector('input').focus()
+  fs.append(list, add)
+  return fs
+}
+function readSnippets() {
+  const list = [], seen = new Set()
+  for (const r of $('#settingsForm').querySelectorAll('.snip-row')) {
+    const name = r.querySelector('[data-snip=name]').value.trim().replace(/^\//, '').toLowerCase(), text = r.querySelector('[data-snip=text]').value
+    if (!name && !text.trim()) continue
+    if (!/^[\w-]+$/.test(name)) return { error: 'A snippet needs a name (letters, numbers, -)' }
+    if (COMMANDS.some((c) => c.name === name)) return { error: `/${name} is a command already` }
+    if (seen.has(name)) return { error: `Two snippets are called /${name}` }
+    if (!text.trim()) return { error: `/${name} has no text` }
+    seen.add(name); list.push({ name, text, send: r.querySelector('[data-snip=send]').checked })
+  }
+  return { list }
+}
 
 // ---------- start ----------
 ;(async () => {

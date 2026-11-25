@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.2 — 2026-11-25
+**New**
+- **Edit and branches:** ✎ under your message changes it and sends it again; ↻ under a reply writes it again. The old versions stay: switch with ‹ 2/3 › under the message, and everything after it switches too.
+- **Under every message,** always shown: copy, edit or regenerate, 🔊 read aloud (Windows' own voice, offline), save as note, 👍/👎, and the time.
+- **Richer replies:** full Markdown (tables, numbered lists, links, quotes, task lists), code with colours and a Copy button, and Mermaid diagrams drawn in the chat. An HTML page the model writes can be opened with **Preview**, in its own window, offline and sandboxed.
+- **/ commands:** type / for the list: /new, /web, /note, /remind, /notes, /chats, /regen, /edit, /copy, /read, /stop, /think, /help and more.
+- **Snippets:** your own prompts as /name, e.g. /summarize with whatever you copied. Make them in Settings › Snippets.
+- **Undo** on every saved note: in replies, Save as note, /note and dictation.
+- **How full the chat is:** a small ring by the status dots; hover it for the numbers. A dashed line in the chat shows which older messages the model no longer sees.
+
+**Fixed**
+- "hello" and other small talk no longer bring up unrelated notes or past chats: memory now asks a match to stand out clearly (tuned for EmbeddingGemma 2).
+- The About tab names EmbeddingGemma 2.
+- Links can no longer take over the Murmur window; they open in your browser.
+
 ## 0.8.1 — 2026-11-25
 **New**
 - **Settings in tabs:** Chat, Listening, Memory and App, instead of one long page. Save still saves all of them.

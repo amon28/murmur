@@ -159,4 +159,58 @@ function parseChangelog(md) {
   return out
 }
 
-module.exports = { settleIntent, NOTE_HINT, PAST_HINT, splitArgs, dropSpecArgs, argValue, firstWords, keyWords, STOP, parseWhen, extractNoteBlocks, CHARS_PER_TOKEN, fitWindow, shareFileChars, INTENT, INTENT_SCHEMA, intentUserText, intentByWords, ASK_PAST, ASK_NOTE, SAVE_NOTE, whisperHints, newerVersion, parseChangelog }
+// ---------- recall ----------
+// Greetings, thanks and okays: nothing in memory is about them, so they never bring up notes or past talks
+const SMALL_TALK = new Set(('hi hello hey hiya heya yo sup there thanks thank you ty thx tysm ok okay okey k kk cool nice great awesome ' +
+  'perfect got it sure yes yeah yep yup no nope nah bye goodbye see later good morning afternoon evening night so much a lot very ' +
+  'murmur again welcome np alright').split(' '))
+function smallTalk(q) {
+  const w = String(q || '').toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean)
+  return w.length > 0 && w.length <= 6 && w.every((x) => SMALL_TALK.has(x) || /^(?:ha)+h?$|^he(?:he)+$|^hm+$|^lo+l$|^x+d$/.test(x))
+}
+// The score a match must reach. With EmbeddingGemma 2, unrelated text still scores about 0.6 against anything, and short
+// messages reach 0.67-0.69, above the fixed minimum; real matches stand far above the rest (+0.18 and more over the
+// typical score, measured on real notes and chats). So a match must also beat this message's typical (median) score by
+// `margin`, once there are enough items to tell what typical is.
+function noiseFloor(scores, min, margin = 0.12, enough = 6) {
+  if (!margin || scores.length < enough) return min
+  const s = [...scores].sort((a, b) => a - b)
+  return Math.max(min, s[s.length >> 1] + margin)
+}
+
+// ---------- branches ----------
+// A conversation keeps one list, `messages`: the branch on screen. Where branches part, the first message of the shown
+// branch carries `fork = { tails, at }`: every branch from that point on as its own list of messages, with the shown
+// one's place left null (it is the rest of `messages`) and `at` its number. A branch put away keeps its own forks inside
+// it, so branches within branches come back as they were.
+const stripFork = (m) => { const { fork, ...rest } = m; return rest }
+// Starts a new branch at position i: the messages from i on are put away (as a branch of the fork already there, or of
+// a new one) and cut from `list`. Returns the fork for the new branch's first message, which the caller adds.
+function forkAt(list, i) {
+  const tail = list.splice(i)
+  const f = tail[0]?.fork
+  const tails = f ? f.tails.slice() : [null]
+  tails[f ? f.at : 0] = [stripFork(tail[0]), ...tail.slice(1)]
+  tails.push(null)
+  return { tails, at: tails.length - 1 }
+}
+// Shows branch k of the fork whose first message is at position i. False when there is no such branch.
+function switchFork(list, i, k) {
+  const f = list[i]?.fork
+  if (!f || !Number.isInteger(k) || k < 0 || k >= f.tails.length || k === f.at || !f.tails[k]?.length) return false
+  const tails = f.tails.slice()
+  tails[f.at] = [stripFork(list[i]), ...list.slice(i + 1)]
+  const next = tails[k]; tails[k] = null
+  list.splice(i, list.length - i, { ...next[0], fork: { tails, at: k } }, ...next.slice(1))
+  return true
+}
+// Every message of the conversation, in all its branches (for its attachments)
+function allMessages(list, out = []) {
+  for (const m of list) {
+    out.push(m)
+    for (const t of m.fork?.tails || []) if (t) allMessages(t, out)
+  }
+  return out
+}
+
+module.exports = { smallTalk, noiseFloor, forkAt, switchFork, allMessages, settleIntent, NOTE_HINT, PAST_HINT, splitArgs, dropSpecArgs, argValue, firstWords, keyWords, STOP, parseWhen, extractNoteBlocks, CHARS_PER_TOKEN, fitWindow, shareFileChars, INTENT, INTENT_SCHEMA, intentUserText, intentByWords, ASK_PAST, ASK_NOTE, SAVE_NOTE, whisperHints, newerVersion, parseChangelog }

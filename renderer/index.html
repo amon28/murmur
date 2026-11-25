@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
   <title>Murmur</title>
+  <link rel="stylesheet" href="vendor/github-dark.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -16,6 +17,7 @@
     <div class="dots" id="dots" title="">
       <span data-k="llm" title="Chat model"></span><span data-k="ears" title="Whisper"></span><span data-k="memory" title="Memory"></span>
     </div>
+    <div id="ctx" class="ctx" hidden></div>
     <div class="spacer"></div>
     <button id="newChat" class="icon" title="New conversation" aria-label="New conversation">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -203,7 +205,7 @@
           <li><a data-url="https://ai.google.dev/gemma">Gemma 4</a> <span>by Google DeepMind, the chat model (QAT build by <a data-url="https://huggingface.co/unsloth">Unsloth</a>)</span></li>
           <li><a data-url="https://github.com/ggml-org/whisper.cpp">whisper.cpp</a> <span>listens to your voice · MIT</span></li>
           <li><a data-url="https://github.com/openai/whisper">Whisper</a> <span>by OpenAI, the speech model · MIT</span></li>
-          <li><a data-url="https://ai.google.dev/gemma/docs/embeddinggemma">EmbeddingGemma</a> <span>by Google, finds related notes and chats</span></li>
+          <li><a data-url="https://ai.google.dev/gemma/docs/embeddinggemma/model_card_2">EmbeddingGemma 2</a> <span>by Google, finds related notes and chats · Apache-2.0</span></li>
           <li><a data-url="https://github.com/huggingface/transformers.js">Transformers.js</a> <span>runs it · Apache-2.0</span></li>
           <li><a data-url="https://www.electronjs.org">Electron</a> <span>the app window · MIT</span></li>
           <li><a data-url="https://playwright.dev">Playwright</a> <span>web search through Edge · Apache-2.0</span></li>
@@ -223,6 +225,9 @@
     </section>
   </aside>
 
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

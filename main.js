@@ -1,6 +1,6 @@
 // Murmur: a small local AI window for notes and conversation.
 // Main process: settings, notes on disk, the llama.cpp and whisper.cpp servers it starts, and the embedder child process.
-const { app, BrowserWindow, ipcMain, globalShortcut, utilityProcess, dialog, shell, Notification, Tray, Menu, nativeImage, desktopCapturer, screen, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, globalShortcut, utilityProcess, dialog, shell, Notification, Tray, Menu, nativeImage, desktopCapturer, screen, clipboard, session } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const crypto = require('node:crypto')
@@ -96,6 +96,15 @@ const DEFAULTS = {
   earsIdleMin: 10, // Whisper stops after this many minutes without the mic (0 = never)
   llmIdleMin: 0, // the chat model too (0 = never)
   autoUpdate: true,
+  // prompt snippets, typed as /name in the chat: {{text}} is what follows the name (or the clipboard), {{cursor}} where
+  // the caret goes; send: true sends it at once, otherwise it waits in the box to be edited
+  snippets: [
+    { name: 'summarize', text: 'Summarize this in a few short bullet points:\n\n{{text}}', send: true },
+    { name: 'explain', text: 'Explain this simply, as if I am new to it:\n\n{{text}}', send: true },
+    { name: 'fix', text: 'Fix the spelling and grammar but keep my wording. Reply with only the corrected text:\n\n{{text}}', send: true },
+    { name: 'translate', text: 'Translate this into {{cursor}}English:\n\n{{text}}', send: false },
+    { name: 'table', text: 'Put this into a Markdown table:\n\n{{text}}', send: true },
+  ],
 }
 
 function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback } }
@@ -377,10 +386,12 @@ function indexNotes() {
 function cosine(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s } // vectors are normalized
 
 // qv: the query's vector when the caller already has it (the message is embedded once per turn)
-async function searchNotes(query, count = settings.recallCount, min = settings.recallMin, near = 0.06, qv = null) {
+// margin: how far above this query's typical score a note must be (see noiseFloor); 0 when the user asks for notes
+async function searchNotes(query, count = settings.recallCount, min = settings.recallMin, near = 0.06, qv = null, margin = 0.12) {
   const q = String(query || '').trim()
-  if (!q || !notes.length) return []
+  if (!q || !notes.length || (margin && L.smallTalk(q))) return []
   let scored = []
+  const all = [] // every note's meaning score, for this query's typical score
   try {
     await indexNotes()
     if (!qv) [qv] = await embed([q], 'query')
@@ -389,9 +400,12 @@ async function searchNotes(query, count = settings.recallCount, min = settings.r
       for (const c of chunks(n)) { const v = vectors.get(c.key); if (!v) continue; const s = cosine(qv, v); if (s > best) { best = s; bestPart = c.part } }
       // a word of the question in the title or text (a dish, a name) counts for more than meaning alone can show
       const title = n.title.toLowerCase(), text = n.text.toLowerCase()
+      all.push(best)
       best += keyWords(q).reduce((b, w) => b + (title.includes(w) ? 0.08 : text.includes(w) ? 0.04 : 0), 0)
       if (best >= min) scored.push({ id: n.id, title: n.title, score: best, part: bestPart })
     }
+    const floor = L.noiseFloor(all, min, margin)
+    scored = scored.filter((x) => x.score >= floor)
   } catch {
     // memory not loaded yet: plain word match
     const words = q.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
@@ -574,7 +588,7 @@ const chatVectors = new VecStore(path.join(DATA, 'chat-vectors.bin')) // convId:
 if (fs.existsSync(CHAT_VECTORS_FILE)) log('chat vectors moved from json:', chatVectors.importJson(CHAT_VECTORS_FILE))
 const exchangeCache = new Map()
 function exchanges(c) {
-  const ver = `${c.messages.length}|${c.updated}`
+  const ver = `${c.messages.length}|${c.updated}|${c.rev || 0}`
   const hit = exchangeCache.get(c.id)
   if (hit?.ver === ver) return hit.list
   const list = exchangesNow(c)
@@ -584,7 +598,7 @@ function exchanges(c) {
 function exchangesNow(c) {
   const out = []
   c.messages.forEach((m, i) => {
-    if (m.role !== 'user' || !String(m.content).trim()) return
+    if (m.role !== 'user' || !String(m.content).trim() || L.smallTalk(m.content)) return // "hello" is nothing to remember
     const r = c.messages[i + 1]?.role === 'assistant' ? c.messages[i + 1] : null
     const text = `User: ${String(m.content).slice(0, 500)}${r ? '\nMurmur: ' + String(r.content).slice(0, 500) : ''}`
     out.push({ key: `${c.id}:${m.at}:${crypto.createHash('sha1').update(text).digest('hex').slice(0, 10)}`, conv: c.id, at: m.at, text })
@@ -613,7 +627,7 @@ function indexChats() {
 }
 // "what did we talk about yesterday", "remember when…": the user is asking about the past, so look more widely
 async function searchChats(query, exceptConv, wide = false, qv = null) {
-  if (!settings.recallChats || !String(query).trim()) return []
+  if (!settings.recallChats || !String(query).trim() || L.smallTalk(query)) return []
   try {
     await indexChats()
     if (!qv) [qv] = await embed([query], 'query')
@@ -624,12 +638,12 @@ async function searchChats(query, exceptConv, wide = false, qv = null) {
       for (const x of exchanges(c)) {
         const v = chatVectors.get(x.key); if (!v) continue
         const low = x.text.toLowerCase()
-        const score = cosine(qv, v) + words.reduce((b, w) => b + (low.includes(w) ? 0.04 : 0), 0)
-        scored.push({ ...x, title: c.title, score })
+        const cos = cosine(qv, v)
+        scored.push({ ...x, title: c.title, cos, score: cos + words.reduce((b, w) => b + (low.includes(w) ? 0.04 : 0), 0) })
       }
     }
     scored.sort((a, b) => b.score - a.score)
-    const min = settings.recallMin - (wide ? 0.06 : 0), best = scored[0]?.score || 0
+    const min = L.noiseFloor(scored.map((s) => s.cos), settings.recallMin - (wide ? 0.06 : 0), wide ? 0.09 : 0.12), best = scored[0]?.score || 0
     const out = [], perConv = {}
     for (const s of scored) {
       if (s.score < min || s.score < best - (wide ? 0.1 : 0.06) || out.length >= (wide ? 5 : 3)) break
@@ -716,7 +730,7 @@ function removeAttachment(id) {
 function sweepAttachments() {
   try {
     const used = new Set()
-    for (const c of convs.values()) for (const m of c.messages) for (const a of m.attachments || []) used.add(a.id)
+    for (const c of convs.values()) for (const m of L.allMessages(c.messages)) for (const a of m.attachments || []) used.add(a.id)
     let n = 0
     for (const f of fs.readdirSync(ATTACH_DIR)) {
       const id = f.replace(/\.(jpg|txt)$/, '')
@@ -848,7 +862,7 @@ let chatBusy = 0
 const idleWaiters = []
 function chatIdle() { return chatBusy ? new Promise((res) => idleWaiters.push(res)) : null }
 function chatEnd() { if (--chatBusy <= 0) { chatBusy = 0; idleWaiters.splice(0).forEach((res) => res()) } }
-async function complete(messages, { onToken, onThink, signal, maxTokens = 1024, temperature = settings.temperature, think = false, side = true, background = false, schema = null } = {}) {
+async function complete(messages, { onToken, onThink, onUsage, signal, maxTokens = 1024, temperature = settings.temperature, think = false, side = true, background = false, schema = null } = {}) {
   if (background) while (chatBusy) await chatIdle()
   const managed = settings.llmMode !== 'external'
   lastLlmUse = Date.now()
@@ -860,7 +874,7 @@ async function complete(messages, { onToken, onThink, signal, maxTokens = 1024, 
   const r = await fetch(llmBase() + '/chat/completions', {
     method: 'POST', headers, signal,
     body: JSON.stringify({
-      model, messages, stream: !!onToken, temperature, max_tokens: think ? maxTokens + 3072 : maxTokens,
+      model, messages, stream: !!onToken, ...(onToken ? { stream_options: { include_usage: true } } : {}), temperature, max_tokens: think ? maxTokens + 3072 : maxTokens,
       // llama.cpp passes this to the chat template; other servers may refuse fields they do not know
       ...(managed ? { chat_template_kwargs: { enable_thinking: !!think }, cache_prompt: true } : {}),
       ...(managed && llmSlots > 1 ? { id_slot: side ? 1 : 0 } : {}),
@@ -874,7 +888,12 @@ async function complete(messages, { onToken, onThink, signal, maxTokens = 1024, 
     if (/exceed|context size|too long/i.test(body)) throw new Error('this is too long for the model to read at once: start a new conversation, or attach less')
     throw new Error(`model answered ${r.status}: ${body.slice(0, 300)}`)
   }
-  if (!onToken) { const j = await r.json(); return j.choices?.[0]?.message?.content || '' }
+  // what the model read and wrote: llama.cpp's own counts (timings), else the OpenAI-style usage other servers send
+  const usage = (j) => {
+    if (j.timings?.prompt_n != null) onUsage?.({ read: (j.timings.cache_n || 0) + j.timings.prompt_n, wrote: j.timings.predicted_n || 0 })
+    else if (j.usage?.prompt_tokens != null) onUsage?.({ read: j.usage.prompt_tokens, wrote: j.usage.completion_tokens || 0 })
+  }
+  if (!onToken) { const j = await r.json(); usage(j); return j.choices?.[0]?.message?.content || '' }
   let text = '', buf = ''
   const dec = new TextDecoder()
   for await (const chunk of r.body) {
@@ -887,6 +906,7 @@ async function complete(messages, { onToken, onThink, signal, maxTokens = 1024, 
       if (data === '[DONE]') return text
       try {
         const j = JSON.parse(data)
+        usage(j)
         if (j.timings && !side) log('llm timings', `prompt ${j.timings.prompt_n} tokens (cache ${j.timings.cache_n ?? '?'}) in ${Math.round(j.timings.prompt_ms)} ms, ${j.timings.predicted_n} out at ${Math.round(j.timings.predicted_per_second)}/s`)
         const delta = j.choices?.[0]?.delta || {}
         if (delta.reasoning_content) onThink?.(delta.reasoning_content)
@@ -901,6 +921,17 @@ async function complete(messages, { onToken, onThink, signal, maxTokens = 1024, 
 // One message at a time: a new one stops the reply still being written and waits until that turn has stored what it
 // had, so the conversation stays in order. While a reply is on its way, background tasks wait (see complete).
 let chatRun = Promise.resolve()
+// The context this conversation can fill: Murmur's own limit (Settings), or the server's if that is smaller
+// (llama.cpp's /props; a server without it just goes by the setting).
+async function contextSize() {
+  const own = Number(settings.llmCtx) || 0
+  try {
+    const headers = settings.llmMode !== 'external' && llmKey ? { Authorization: `Bearer ${llmKey}` } : settings.externalKey ? { Authorization: `Bearer ${settings.externalKey}` } : {}
+    const r = await fetch(llmBase().replace(/\/v1$/, '') + '/props', { headers, signal: AbortSignal.timeout(1500) })
+    if (r.ok) { const j = await r.json(); const n = Number(j.default_generation_settings?.n_ctx || j.n_ctx); if (n > 0) return own ? Math.min(own, n) : n }
+  } catch {}
+  return own || null
+}
 ipcMain.handle('chat:send', async (e, payload) => {
   const prev = chatRun
   chatAbort?.abort()
@@ -913,24 +944,37 @@ ipcMain.handle('chat:send', async (e, payload) => {
 })
 const stopped = () => Object.assign(new Error('stopped'), { name: 'AbortError' })
 async function sendChat(e, payload) {
-  const { text: rawText, attachments = [], web: forceWeb = false } = typeof payload === 'string' ? { text: payload } : payload || {}
-  const userText = String(rawText || '').trim()
+  const { text: rawText, attachments: sent = [], web: forceWeb = false, editAt, regenAt } = typeof payload === 'string' ? { text: payload } : payload || {}
+  const c = conv // the reply belongs here even if another conversation is opened meanwhile
+  // editAt: a message of the user's, sent again as edited, on a new branch from there (its files stay with it).
+  // regenAt: a reply written again, on a new branch from that reply, for the same message.
+  const editI = editAt ? c.messages.findIndex((m) => m.at === editAt && m.role === 'user') : -1
+  const regenI = regenAt ? c.messages.findIndex((m) => m.at === regenAt && m.role === 'assistant') : -1
+  if ((editAt && editI < 0) || (regenAt && !(regenI > 0 && c.messages[regenI - 1].role === 'user'))) return null
+  const again = regenAt ? c.messages[regenI - 1] : null
+  const attachments = again ? again.attachments || [] : editAt ? c.messages[editI].attachments || [] : sent
+  const userText = again ? String(again.content || '') : String(rawText || '').trim()
   if (!userText && !attachments.length) return null
   clearTimeout(reflectT)
   const abort = chatAbort = new AbortController()
   const live = () => { if (abort.signal.aborted) throw stopped() }
-  const c = conv // the reply belongs here even if another conversation is opened meanwhile
   const t0 = Date.now(), times = {}
   // events carry the conversation id, so the window ignores them once it shows a different one
   const send = (ch, v) => { if (!e.sender.isDestroyed()) e.sender.send(ch, { ...v, conv: c.id }) }
-  const { list: atts, cut } = allotFiles(attachments)
-  const user = { role: 'user', content: userText, at: Date.now(), ...(atts.length ? { attachments: atts } : {}) }
-  const history = c.messages.slice()
-  c.messages.push(user); c.updated = Date.now(); saveConv(c)
-  if (c.messages.length === 1) { c.title = firstWords(userText || attachments[0].name); win?.webContents.send('chats-changed') }
+  const userFork = editAt ? L.forkAt(c.messages, editI) : null
+  const replyFork = regenAt ? L.forkAt(c.messages, regenI) : null
+  // a new branch: the trimmed window and the context numbers belonged to the old one
+  if (userFork || replyFork) { c.windowFrom = 0; delete c.context; c.rev = (c.rev || 0) + 1 }
+  const { list: atts, cut } = again ? { list: attachments, cut: [] } : allotFiles(attachments)
+  const user = again || { role: 'user', content: userText, at: Date.now(), ...(atts.length ? { attachments: atts } : {}), ...(userFork ? { fork: userFork } : {}) }
+  const history = again ? c.messages.slice(0, -1) : c.messages.slice()
+  if (!again) c.messages.push(user)
+  c.updated = Date.now(); saveConv(c)
+  const forkCount = (f) => (f ? { n: f.tails.length, k: f.at } : null)
+  if (c.messages.length === 1 && !userFork) { c.title = firstWords(userText || attachments[0].name); win?.webContents.send('chats-changed') }
   // the reply box (and Stop) shows at once, before the intent and recall steps
-  send('chat:start', { cut })
-  let partial = '', thought = '', thoughtStart = 0, recalledIds = [], chatIds = []
+  send('chat:start', { cut, userAt: user.at, userFork: forkCount(userFork), replyFork: forkCount(replyFork) })
+  let partial = '', thought = '', thoughtStart = 0, recalledIds = [], chatIds = [], used = null
   try {
     if (settings.llmMode !== 'external' && servers.llm?.state === 'sleeping') send('chat:status', { text: 'Waking the chat model…' })
     // what the message is for, and its meaning as a vector, at the same time; the vector serves both recall searches
@@ -946,7 +990,7 @@ async function sendChat(e, payload) {
     const topic = showNotes ? intent.topic || userText.replace(/\b(please|can you|could you|get|show|open|read|find|retrieve|pull up|look up|display|see|check|give me|me|my|the|a|an|notes?|about|on|for|what('?s| is| was) in)\b/gi, ' ').replace(/[\s?.!]+/g, ' ').trim() || userText : userText
     const wide = intent.past
     const [found, pastChats] = await Promise.all([
-      userText ? searchNotes(topic, showNotes ? 3 : settings.recallCount, showNotes ? settings.recallMin - 0.07 : settings.recallMin, 0.06, topic === userText ? qv : null) : [],
+      userText ? searchNotes(topic, showNotes ? 3 : settings.recallCount, showNotes ? settings.recallMin - 0.07 : settings.recallMin, 0.06, topic === userText ? qv : null, showNotes ? 0 : 0.12) : [],
       userText && !showNotes && !mayStore ? searchChats(userText, c.id, wide, qv) : [], // saving needs no old talks
     ])
     times.recall = Date.now() - t0
@@ -972,6 +1016,7 @@ async function sendChat(e, payload) {
       let shown = 0, asked = null
       reply = await complete(messages, {
         signal: abort.signal, side: false,
+        onUsage: (u) => { used = u },
         think: settings.thinking,
         onThink: (t) => { if (!thoughtStart) thoughtStart = Date.now(); thought += t; send('chat:think', { t }) },
         onToken: (_t, all) => {
@@ -992,7 +1037,7 @@ async function sendChat(e, payload) {
     reply = clean
     const b = mayStore ? blocks.find((x) => x.body) : null
     if (b?.type === 'add') {
-      const n = appendNote(recalled.find((r) => r.ref === b.ref)?.id, b.body); if (n) saved.push({ ...n, added: true })
+      const n = appendNote(recalled.find((r) => r.ref === b.ref)?.id, b.body); if (n) saved.push({ ...n, added: true, addedText: b.body })
     } else if (b) {
       const when = parseWhen(b.remind)
       if (b.remind && !(when > Date.now())) log('reminder time not understood:', b.remind)
@@ -1002,7 +1047,7 @@ async function sendChat(e, payload) {
         // a recalled note whose title words hold this one's ("Cabin wifi" -> "Wifi password for the cabin") is the same topic
         const words = keyWords(b.title), covers = (t) => { const k = keyWords(t); return words.length > 0 && words.every((w) => k.some((x) => x.startsWith(w) || w.startsWith(x))) }
         const twin = b.title && (notes.find((n) => n.title.trim().toLowerCase() === b.title.toLowerCase()) || notes.find((n) => recalled.some((r) => r.id === n.id) && covers(n.title)))
-        saved.push(twin ? { ...appendNote(twin.id, b.body), added: true } : addNote({ title: b.title, text: b.body, source: 'chat' }))
+        saved.push(twin ? { ...appendNote(twin.id, b.body), added: true, addedText: b.body } : addNote({ title: b.title, text: b.body, source: 'chat' }))
       }
     }
     // the message wanted something kept but the model wrote no note block (it may even say it did): keep it here.
@@ -1024,10 +1069,11 @@ async function sendChat(e, payload) {
     const sources = web?.results.slice(0, 5).map(({ title, url }) => ({ title, url })) || []
     const at = Date.now()
     const thinking = thought.trim() ? { thinking: thought.trim(), thoughtMs: Date.now() - thoughtStart } : {}
-    const savedOut = saved.map(({ id, title, added, remind }) => ({ id, title, ...(added ? { added } : {}), ...(remind ? { remind } : {}) }))
-    c.messages.push({ role: 'assistant', content: reply, at, ...thinking, recalled: recalledIds, ...(chatIds.length ? { chats: chatIds } : {}), saved: savedOut, ...(sources.length ? { sources } : {}) })
+    const savedOut = saved.map(({ id, title, added, addedText, remind }) => ({ id, title, ...(added ? { added, addedText: String(addedText || '').trim() } : {}), ...(remind ? { remind } : {}) }))
+    c.messages.push({ role: 'assistant', content: reply, at, ...thinking, recalled: recalledIds, ...(chatIds.length ? { chats: chatIds } : {}), saved: savedOut, ...(sources.length ? { sources } : {}), ...(replyFork ? { fork: replyFork } : {}) })
+    if (used) c.context = { ...used, size: await contextSize(), from: c.windowFrom || 0 }
     c.updated = Date.now(); saveConv(c)
-    send('chat:done', { at, ...thinking, text: reply, saved: savedOut, sources, recalled: recalledIds, chats: chatIds })
+    send('chat:done', { at, ...thinking, text: reply, saved: savedOut, sources, recalled: recalledIds, chats: chatIds, context: c.context })
     log('timing', `intent ${times.intent} ms, recall ${times.recall} ms, first token ${times.first ?? '-'} ms, done ${Date.now() - t0} ms`)
     nameConv(c)
     maybeReflect()
@@ -1040,7 +1086,7 @@ async function sendChat(e, payload) {
     const kept = L.extractNoteBlocks(partial).text
     const at = Date.now()
     const thinking = thought.trim() ? { thinking: thought.trim(), thoughtMs: Date.now() - (thoughtStart || at) } : {}
-    c.messages.push({ role: 'assistant', content: kept, at, ...thinking, recalled: recalledIds, ...(wasStopped ? { stopped: true } : { error: String(err.message).slice(0, 300) }) })
+    c.messages.push({ role: 'assistant', content: kept, at, ...thinking, recalled: recalledIds, ...(wasStopped ? { stopped: true } : { error: String(err.message).slice(0, 300) }), ...(replyFork ? { fork: replyFork } : {}) })
     c.updated = Date.now(); saveConv(c)
     send('chat:done', { at, error: wasStopped ? 'stopped' : err.message, text: kept })
     return false
@@ -1048,6 +1094,26 @@ async function sendChat(e, payload) {
 }
 let ws = null
 function websearch() { return (ws ||= require('./websearch')) }
+// A web page the model wrote, shown in its own window: sandboxed, its own in-memory session with no network (only the page
+// itself), no permissions, no downloads, no popups or navigation. Its scripts run there, apart from Murmur.
+let previewSession = null
+ipcMain.handle('preview:html', (_e, html) => {
+  if (!previewSession) {
+    previewSession = session.fromPartition('murmur-preview')
+    previewSession.webRequest.onBeforeRequest((d, cb) => cb({ cancel: !/^(data|blob|about|devtools):/i.test(d.url) }))
+    previewSession.setPermissionRequestHandler((_w, _p, cb) => cb(false))
+    previewSession.setPermissionCheckHandler(() => false)
+    previewSession.on('will-download', (e) => e.preventDefault())
+  }
+  const w = new BrowserWindow({ width: 900, height: 700, title: 'Preview (offline, sandboxed)', autoHideMenuBar: true, backgroundColor: '#ffffff', icon: path.join(__dirname, 'renderer', 'icon.png'),
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, session: previewSession, spellcheck: false } })
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  w.webContents.on('will-navigate', (e) => e.preventDefault())
+  w.webContents.on('page-title-updated', (e, t) => { e.preventDefault(); w.setTitle(`${t ? t + ' · ' : ''}Preview (offline, sandboxed)`) })
+  w.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(String(html || '')).toString('base64'))
+  return true
+})
+ipcMain.handle('app:clipboard', () => clipboard.readText())
 ipcMain.handle('app:openUrl', (_e, url) => { if (/^(https?:\/\/|mailto:)/i.test(url)) shell.openExternal(url) })
 ipcMain.handle('app:info', () => ({ version: app.getVersion(), electron: process.versions.electron }))
 ipcMain.handle('attach:image', (_e, id) => { try { return 'data:image/jpeg;base64,' + fs.readFileSync(path.join(ATTACH_DIR, String(id).replace(/[^\w-]/g, '') + '.jpg')).toString('base64') } catch { return null } })
@@ -1073,12 +1139,22 @@ ipcMain.handle('profile:reset', (_e, what) => {
   saveProfile(); return { ...profile, learn: settings.learn }
 })
 ipcMain.handle('chat:stop', () => { chatAbort?.abort(); return true })
-ipcMain.handle('chat:history', () => ({ id: conv.id, title: conv.title, messages: conv.messages }))
+// show another branch: `at` names the message where the branches part, k the branch
+ipcMain.handle('chat:branch', (_e, convId, at, k) => {
+  const c = convs.get(convId)
+  if (c && !(chatBusy && c === conv)) {
+    const i = c.messages.findIndex((m) => m.at === at && m.fork)
+    if (i >= 0 && L.switchFork(c.messages, i, k)) { c.windowFrom = 0; delete c.context; c.rev = (c.rev || 0) + 1; saveConv(c) }
+  }
+  const v = c || conv
+  return { id: v.id, title: v.title, messages: v.messages, context: v.context }
+})
+ipcMain.handle('chat:history', () => ({ id: conv.id, title: conv.title, messages: conv.messages, context: conv.context }))
 ipcMain.handle('chat:new', () => {
   if (!conv.messages.length) return conv.id // already on an empty one
   conv = newConv(); return conv.id
 })
-ipcMain.handle('chat:open', (_e, id) => { const c = convs.get(id); if (c) conv = c; return { id: conv.id, title: conv.title, messages: conv.messages } })
+ipcMain.handle('chat:open', (_e, id) => { const c = convs.get(id); if (c) conv = c; return { id: conv.id, title: conv.title, messages: conv.messages, context: conv.context } })
 ipcMain.handle('chat:list', (_e, q) => {
   q = String(q || '').trim().toLowerCase()
   return [...convs.values()]
@@ -1090,7 +1166,7 @@ ipcMain.handle('chat:delete', (_e, id) => {
   const gone = convs.get(id)
   convs.delete(id)
   // its attached files and pictures go with it
-  for (const m of gone?.messages || []) for (const a of m.attachments || []) removeAttachment(a.id)
+  for (const m of L.allMessages(gone?.messages || [])) for (const a of m.attachments || []) removeAttachment(a.id)
   try { fs.unlinkSync(path.join(CHATS_DIR, id + '.json')) } catch {}
   if (conv?.id === id) conv = latestConv() || newConv()
   return conv.id
@@ -1303,6 +1379,20 @@ ipcMain.handle('notes:delete', (_e, id) => {
   saveNotes(); saveTrash(); indexNotes(); return true
 })
 ipcMain.handle('notes:trash', () => trash)
+// Undo a save: a new note goes to the trash (still recoverable there); text added to a note is taken off again, if the note
+// still ends with it. conv + at: the reply that saved it, which then shows it as undone.
+ipcMain.handle('notes:undo', (_e, { id, addedText, conv: convId, at } = {}) => {
+  const n = notes.find((x) => x.id === id)
+  let ok = false
+  if (n && addedText) {
+    const t = n.text.trimEnd(), add = String(addedText).trim()
+    if (add && t.endsWith(add)) { n.text = t.slice(0, t.length - add.length).trimEnd(); n.updated = Date.now(); ok = true }
+  } else if (n) { notes = notes.filter((x) => x !== n); trash.unshift({ ...n, deleted: Date.now() }); saveTrash(); ok = true }
+  if (ok) { saveNotes(); indexNotes(); win?.webContents.send('notes-changed') }
+  const c = convId && convs.get(convId), m = c?.messages.find((x) => x.at === at && x.role === 'assistant'), s = m?.saved?.find((x) => x.id === id)
+  if (s && ok) { s.undone = true; saveConv(c) }
+  return ok
+})
 ipcMain.handle('notes:restore', (_e, id) => {
   const n = trash.find((x) => x.id === id); if (!n) return null
   trash = trash.filter((x) => x.id !== id); delete n.deleted; notes.unshift(n)
@@ -1365,7 +1455,7 @@ function checkReminders() {
   saveNotes(); win?.webContents.send('notes-changed')
 }
 setInterval(checkReminders, 20000)
-ipcMain.handle('notes:search', (_e, q) => searchNotes(q, 20, settings.recallMin - 0.03, 0))
+ipcMain.handle('notes:search', (_e, q) => searchNotes(q, 20, settings.recallMin - 0.03, 0, null, 0))
 ipcMain.handle('notes:export', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Export notes to folder', properties: ['openDirectory', 'createDirectory'] })
   if (r.canceled || !r.filePaths[0]) return 0
@@ -1554,6 +1644,9 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
   // the microphone is the only permission the page gets
   win.webContents.session.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === 'media'))
+  // the window never leaves Murmur: a link in a reply opens in the browser instead
+  win.webContents.on('will-navigate', (e, url) => { e.preventDefault(); if (/^(https?:|mailto:)/i.test(url)) shell.openExternal(url) })
+  win.webContents.setWindowOpenHandler(({ url }) => { if (/^(https?:|mailto:)/i.test(url)) shell.openExternal(url); return { action: 'deny' } })
   const keep = () => { if (!win.isMinimized() && !win.isMaximized()) writeJson(path.join(DATA, 'window.json'), win.getBounds()) }
   win.on('resized', keep); win.on('moved', keep)
   win.on('close', (e) => {

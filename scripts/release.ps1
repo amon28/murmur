@@ -2,11 +2,12 @@
 # Run after `npm run dist`: powershell -ExecutionPolicy Bypass -File scripts\release.ps1
 $app = Split-Path $PSScriptRoot -Parent
 $api = Join-Path $PSScriptRoot 'gh-api.ps1'
-$ver = (Get-Content "$app\package.json" -Raw | ConvertFrom-Json).version
+# -Encoding UTF8: Windows PowerShell 5 reads files as ANSI otherwise, and the notes come out garbled (it happened to 0.8.1)
+$ver = (Get-Content "$app\package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
 # the release notes: this version's section of CHANGELOG.md
-$cl = Get-Content "$app\CHANGELOG.md" -Raw
+$cl = Get-Content "$app\CHANGELOG.md" -Raw -Encoding UTF8
 $sec = [regex]::Match($cl, "(?ms)^## $([regex]::Escape($ver))[^\n]*\n(.*?)(?=^## |\z)").Groups[1].Value.Trim()
-$body = @{ tag_name = "v$ver"; target_commitish = 'main'; name = "Murmur $ver"; body = $sec + "`n`n**Install:** download ``Murmur-Setup-$ver.exe`` below and run it. Windows may say ""Windows protected your PC"" because the installer isn't signed: click **More info â†’ Run anyway**. Installed copies from 0.8.0 on update themselves."; draft = $false; prerelease = $false } | ConvertTo-Json
+$body = @{ tag_name = "v$ver"; target_commitish = 'main'; name = "Murmur $ver"; body = $sec + "`n`n**Install:** download ``Murmur-Setup-$ver.exe`` below and run it. Windows may say ""Windows protected your PC"" because the installer isn't signed: click **More info**, then **Run anyway**. Installed copies from 0.8.0 on update themselves."; draft = $false; prerelease = $false } | ConvertTo-Json
 $r = & $api -Method POST -Path /repos/amon28/murmur/releases -Body $body
 if ($r -like 'HTTP_ERROR*') { "release failed: $r"; exit 1 }
 $rel = $r | ConvertFrom-Json

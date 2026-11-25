@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('murmur', {
     rename: (id, title) => ipcRenderer.invoke('chat:rename', id, title),
     remove: (id) => ipcRenderer.invoke('chat:delete', id),
     rate: (conv, at, rating) => ipcRenderer.invoke('chat:rate', conv, at, rating),
+    branch: (conv, at, k) => ipcRenderer.invoke('chat:branch', conv, at, k),
     onStart: on('chat:start'), onRecall: on('chat:recall'), onNotice: on('chat:notice'), onToken: on('chat:token'), onDone: on('chat:done'), onThink: on('chat:think'), onStatus: on('chat:status'), onListChanged: on('chats-changed'),
   },
   attach: {
@@ -39,6 +40,8 @@ contextBridge.exposeInMainWorld('murmur', {
     onProgress: on('setup:progress'),
   },
   openUrl: (url) => ipcRenderer.invoke('app:openUrl', url),
+  previewHtml: (html) => ipcRenderer.invoke('preview:html', html),
+  clipboardText: () => ipcRenderer.invoke('app:clipboard'),
   info: () => ipcRenderer.invoke('app:info'),
   ears: { transcribe: (wav) => ipcRenderer.invoke('ears:transcribe', wav), wake: () => ipcRenderer.invoke('ears:wake'), dictating: (on) => ipcRenderer.invoke('ears:dictating', on) },
   notes: {
@@ -54,6 +57,7 @@ contextBridge.exposeInMainWorld('murmur', {
     trash: () => ipcRenderer.invoke('notes:trash'),
     restore: (id) => ipcRenderer.invoke('notes:restore', id),
     purge: (id) => ipcRenderer.invoke('notes:purge', id),
+    undo: (op) => ipcRenderer.invoke('notes:undo', op),
     ai: (id, action) => ipcRenderer.invoke('notes:ai', id, action),
     onChanged: on('notes-changed'),
     onOpen: on('note:open'),

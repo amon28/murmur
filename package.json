@@ -1,11 +1,13 @@
 {
   "name": "murmur",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Local AI note taker and chat: whisper.cpp for the mic, llama.cpp for chat, EmbeddingGemma for recall",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
+    "prestart": "node scripts/vendor.js",
     "start": "electron .",
+    "predist": "node scripts/vendor.js",
     "dist": "electron-builder --win nsis --publish never",
     "test": "node --test tests/lib.test.js",
     "eval:intent": "node tests/intent-eval.js"
@@ -13,8 +15,12 @@
   "private": true,
   "updateUrl": "https://github.com/amon28/murmur/releases/latest/download/",
   "devDependencies": {
+    "@highlightjs/cdn-assets": "^11.12.0",
+    "dompurify": "^3.5.0",
     "electron": "^45.0.0",
-    "electron-builder": "^26.18.0"
+    "electron-builder": "^26.18.0",
+    "marked": "^18.3.0",
+    "mermaid": "^12.3.0"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",

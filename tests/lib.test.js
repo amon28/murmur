@@ -105,3 +105,45 @@ test('settleIntent checks the model against the words', () => {
   assert.equal(L.settleIntent('what did we talk about yesterday', { intent: 'chat', past: false }).past, true)
   assert.equal(L.settleIntent('hello there friend', { intent: 'nonsense' }).intent, 'chat')
 })
+
+test('branches: edit, regenerate, switch, nested, all messages', () => {
+  const m = (role, content, at) => ({ role, content, at })
+  const text = (list) => list.map((x) => x.content).join(' ')
+  const list = [m('user', 'hi', 1), m('assistant', 'hello', 2), m('user', 'q', 3), m('assistant', 'a', 4)]
+  // edit message 3: the old branch is put away, the new one starts
+  let f = L.forkAt(list, 2)
+  assert.equal(text(list), 'hi hello')
+  list.push({ ...m('user', 'q2', 5), fork: f }, m('assistant', 'a2', 6))
+  assert.deepEqual([list[2].fork.at, list[2].fork.tails.length], [1, 2])
+  // back to the first branch, and forward again
+  assert.ok(L.switchFork(list, 2, 0)); assert.equal(text(list), 'hi hello q a'); assert.equal(list[2].fork.at, 0)
+  assert.ok(L.switchFork(list, 2, 1)); assert.equal(text(list), 'hi hello q2 a2')
+  assert.equal(L.switchFork(list, 2, 1), false, 'already shown'); assert.equal(L.switchFork(list, 2, 5), false); assert.equal(L.switchFork(list, 1, 0), false, 'no fork there')
+  // regenerate the reply inside branch 2: a fork within the branch
+  const g = L.forkAt(list, 3)
+  list.push({ ...m('assistant', 'a3', 7), fork: g })
+  assert.equal(text(list), 'hi hello q2 a3')
+  // leave branch 2 and come back: its own fork is still there, on the reply shown last
+  L.switchFork(list, 2, 0); assert.equal(text(list), 'hi hello q a')
+  L.switchFork(list, 2, 1); assert.equal(text(list), 'hi hello q2 a3'); assert.deepEqual([list[3].fork.at, list[3].fork.tails.length], [1, 2])
+  L.switchFork(list, 3, 0); assert.equal(text(list), 'hi hello q2 a2')
+  // a third edit of the same message joins the same fork
+  const h = L.forkAt(list, 2)
+  assert.equal(h.tails.length, 3); list.push({ ...m('user', 'q3', 8), fork: h })
+  assert.equal(text(L.allMessages(list).sort((x, y) => x.at - y.at)), 'hi hello q a q2 a2 a3 q3')
+  // what is saved is plain JSON
+  const back = JSON.parse(JSON.stringify(list)); assert.ok(L.switchFork(back, 2, 1)); assert.equal(text(back), 'hi hello q2 a2')
+})
+
+test('recall: small talk, and the noise floor', () => {
+  for (const q of ['hello', 'Hi!', 'hey there', 'thanks!', 'Thank you so much', 'ok', 'okay murmur', 'good morning', 'haha', 'lol', 'no thanks', 'bye'])
+    assert.ok(L.smallTalk(q), q)
+  for (const q of ['how about spaghetti?', 'what is a tapsilog', 'hello, what is the capital of France?', 'ok so remind me tomorrow', 'thanks, now save that', '', 'no'.repeat(3)])
+    assert.equal(L.smallTalk(q), false, q)
+  // measured: "hello" against 14 past exchanges, typical 0.60; an unrelated one at 0.671 slipped over the old 0.65
+  const hello = [0.55, 0.57, 0.58, 0.59, 0.59, 0.6, 0.6, 0.6, 0.61, 0.62, 0.63, 0.645, 0.671, 0.832]
+  const floor = L.noiseFloor(hello, 0.65)
+  assert.ok(floor > 0.671 && floor < 0.79, String(floor))
+  assert.equal(L.noiseFloor([0.6, 0.7], 0.65), 0.65, 'too few to tell: the plain minimum')
+  assert.equal(L.noiseFloor(hello, 0.65, 0), 0.65, 'margin 0: the plain minimum')
+})
