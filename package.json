@@ -1,6 +1,6 @@
 {
   "name": "murmur",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Local AI note taker and chat: whisper.cpp for the mic, llama.cpp for chat, EmbeddingGemma for recall",
   "main": "main.js",
   "type": "commonjs",

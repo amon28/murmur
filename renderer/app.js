@@ -308,9 +308,7 @@ M.setup.onProgress(({ key, got, total, done, error, checking }) => {
 // main process) when it is there, else by a loudness gate with an adaptive noise floor.
 class Recorder {
   async start({ onSegment, onLevel, silenceMs, maxMs = 28000 }) {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: settings.micDevice ? { exact: settings.micDevice } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-    })
+    this.stream = await openMic()
     const useVad = settings.vad === 'silero' && await M.vad.start().catch(() => false)
     this.ctx = new AudioContext({ sampleRate: 16000 })
     await this.ctx.audioWorklet.addModule('worklet.js')
@@ -380,7 +378,30 @@ function earsReady() {
   addMsg('system', status.ears?.state === 'starting' ? 'Whisper is still loading, try again in a moment.' : status.ears?.state === 'missing' ? 'The speech model is not downloaded yet — click the status dots or Settings › Downloads.' : 'Whisper is not running. Check Settings.')
   return false
 }
-function micError(e) { addMsg('system', 'Microphone: ' + (e.message || e)) }
+// Opens the chosen mic. If it is gone (unplugged, or Windows gave it a new ID), falls back to the default mic, forgets
+// the old choice and says so once, instead of failing with "OverconstrainedError".
+async function openMic() {
+  const audio = (id) => ({ audio: { deviceId: id ? { exact: id } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
+  try { return await navigator.mediaDevices.getUserMedia(audio(settings.micDevice)) } catch (e) {
+    if (!settings.micDevice || !['OverconstrainedError', 'NotFoundError'].includes(e.name)) throw e
+    const stream = await navigator.mediaDevices.getUserMedia(audio(''))
+    settings = await M.settings.set({ ...settings, micDevice: '' }).catch(() => ({ ...settings, micDevice: '' }))
+    addMsg('system', "The microphone picked in Settings isn't connected, so Murmur is using the default one. You can pick another in Settings.")
+    return stream
+  }
+}
+// Plain words for the browser's mic errors
+function micError(e) {
+  const say = {
+    NotAllowedError: 'Murmur is not allowed to use the microphone. In Windows, open Settings › Privacy & security › Microphone and turn on "Let desktop apps access your microphone".',
+    SecurityError: 'Murmur is not allowed to use the microphone. In Windows, open Settings › Privacy & security › Microphone and turn on "Let desktop apps access your microphone".',
+    NotFoundError: 'No microphone found. Plug one in, or check that it is turned on in Windows sound settings.',
+    OverconstrainedError: 'That microphone isn\'t available. Pick another one in Settings, or choose "System default".',
+    NotReadableError: 'The microphone is busy or not responding. Close other apps that use it (calls, recorders), or unplug it and plug it back in.',
+    AbortError: 'The microphone stopped unexpectedly. Try again, or unplug it and plug it back in.',
+  }[e?.name]
+  addMsg('system', 'Microphone: ' + (say || e?.message || e))
+}
 
 // Talk: one utterance, sent as a chat message
 let talk = null
@@ -833,7 +854,7 @@ $('#updateLater').onclick = () => { $('#updateBar').hidden = true }
 
 // ---------- settings ----------
 const FIELDS = [
-  ['Chat model', 'llm', [
+  ['Chat model', 'llm', 'chat', [
     ['llmMode', 'select', 'Runs on', { options: [['managed', 'llama.cpp started by Murmur'], ['external', 'Another OpenAI-compatible server']] }],
     ['llamaServer', 'file', 'llama-server.exe', { when: 'managed' }],
     ['llmModel', 'file', 'Model (.gguf)', { when: 'managed', list: 'llm' }],
@@ -851,7 +872,7 @@ const FIELDS = [
     ['webSearch', 'select', 'Web search (through Microsoft Edge)', { options: [['auto', 'When the assistant needs it, or with 🌐'], ['button', 'Only when I press 🌐'], ['off', 'Off']] }],
     ['systemPrompt', 'textarea', 'Personality / instructions'],
   ]],
-  ['Whisper (listening)', 'ears', [
+  ['Whisper (listening)', 'ears', 'listen', [
     ['whisperServer', 'file', 'whisper-server.exe (Vulkan build)'],
     ['whisperModel', 'file', 'Whisper model (.bin)', { list: 'whisper' }],
     ['whisperLang', 'text', 'Language (en, tl, ja… or auto)'],
@@ -863,7 +884,7 @@ const FIELDS = [
     ['earsIdleMin', 'number', 'Free its video memory after this many minutes without the mic (0 = never)'],
     ['silenceMs', 'number', 'Pause that ends a sentence (ms)', { step: 50 }],
   ]],
-  ['Memory (embeddings)', 'memory', [
+  ['Memory (embeddings)', 'memory', 'memory', [
     ['embedDir', 'folder', 'Models folder'],
     ['embedModel', 'text', 'Model id (folder inside it)'],
     ['embedDtype', 'select', 'Weights', { options: [['q8', 'q8'], ['q4', 'q4'], ['fp16', 'fp16'], ['fp32', 'fp32']] }],
@@ -872,7 +893,7 @@ const FIELDS = [
     ['recallChats', 'check', 'Bring up related past conversations too'],
     ['tidyNotes', 'check', 'Organize dictated notes (title, cleaned-up and in order)'],
   ]],
-  ['Window', null, [
+  ['Window', null, 'app', [
     ['alwaysOnTop', 'check', 'Keep on top of other windows'],
     ['hotkeyShow', 'text', 'Show / hide hotkey'],
     ['hotkeyDictate', 'text', 'Dictate hotkey'],
@@ -881,18 +902,32 @@ const FIELDS = [
     ['closeToTray', 'check', 'Closing keeps Murmur in the tray (reminders still come)'],
     ['startAtLogin', 'check', 'Start with Windows (in the tray)'],
   ]],
-  ['Updates', null, [
+  ['Updates', null, 'app', [
     ['autoUpdate', 'check', 'Download new versions by themselves (you choose when to restart)'],
   ]],
 ]
+// The sub-tabs along the top of Settings. All of them stay in one form, so Save keeps every setting.
+const SUBTABS = [['chat', 'Chat'], ['listen', 'Listening'], ['memory', 'Memory'], ['app', 'App']]
+let subTab = 'chat'
 let found = { whisper: [], llm: [] }
 async function renderSettings() {
   const r = await M.settings.get()
   settings = r.settings; found = r.found
   const mics = (await navigator.mediaDevices.enumerateDevices().catch(() => [])).filter((d) => d.kind === 'audioinput')
   const form = $('#settingsForm'); form.innerHTML = ''
-  for (const [title, key, fields] of FIELDS) {
-    const fs = el('fieldset'); const lg = el('legend', '', title)
+  const bar = el('div', 'subtabs'); bar.setAttribute('role', 'tablist')
+  const show = (id) => {
+    subTab = id
+    bar.querySelectorAll('button').forEach((b) => { const on = b.dataset.sub === id; b.classList.toggle('active', on); b.setAttribute('aria-selected', on) })
+    form.querySelectorAll('[data-sub]:not(button)').forEach((n) => { n.hidden = n.dataset.sub !== id })
+    form.scrollTop = 0
+  }
+  for (const [id, label] of SUBTABS) {
+    const b = el('button', '', label); b.type = 'button'; b.dataset.sub = id; b.setAttribute('role', 'tab'); b.onclick = () => show(id); bar.append(b)
+  }
+  form.append(bar)
+  for (const [title, key, sub, fields] of FIELDS) {
+    const fs = el('fieldset'); fs.dataset.sub = sub; const lg = el('legend', '', title)
     if (key) {
       const st = el('span', 'st'); st.dataset.st = key; lg.append(st)
       const rs = el('button', 'ghost small', 'Restart'); rs.type = 'button'; rs.onclick = () => M.settings.restart(key); lg.append(rs)
@@ -906,6 +941,7 @@ async function renderSettings() {
         const opts = type === 'mic' ? [['', 'System default'], ...mics.map((m) => [m.deviceId, m.label || 'Microphone'])] : opt.options
         for (const [v, t] of opts) { const o = el('option', '', t); o.value = v; inp.append(o) }
         inp.value = settings[name] ?? ''
+        if (type === 'mic' && inp.selectedIndex < 0) inp.value = '' // saved mic not connected: show the default, not a blank box
       } else if (type === 'textarea') { inp = el('textarea'); inp.rows = 3; inp.value = settings[name] ?? '' }
       else if (type === 'check') { inp = el('input'); inp.type = 'checkbox'; inp.checked = !!settings[name] }
       else {
@@ -929,10 +965,11 @@ async function renderSettings() {
     }
     form.append(fs)
   }
-  form.append(el('div', 'hint', 'Changing a model or path restarts only that part. Tip: if another app on this PC already serves the same model (LM Studio, Ollama, another llama-server), pick "Another OpenAI-compatible server" and give its address, to share it instead of loading a second copy.'))
+  const hint = el('div', 'hint', 'Changing a model or path restarts only that part. Tip: if another app on this PC already serves the same model (LM Studio, Ollama, another llama-server), pick "Another OpenAI-compatible server" and give its address, to share it instead of loading a second copy.'); hint.dataset.sub = 'chat'; form.append(hint)
   const mode = form.querySelector('[name=llmMode]')
   const sync = () => form.querySelectorAll('label[data-when]').forEach((l) => { l.hidden = !!l.dataset.when && l.dataset.when !== mode.value })
   mode.onchange = sync; sync()
+  show(subTab)
   paintStatus(status)
 }
 $('#settingsSave').onclick = async () => {

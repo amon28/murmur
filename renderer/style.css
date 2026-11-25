@@ -141,6 +141,10 @@ input:focus, textarea:focus, select:focus { outline: 2px solid color-mix(in srgb
 .note-text { flex: 1; resize: none; line-height: 1.5 }
 
 #settingsForm { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 2px }
+.subtabs { position: sticky; top: 0; z-index: 1; display: flex; gap: 4px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; flex-shrink: 0 }
+.subtabs button { flex: 1; padding: 5px 6px; border-radius: 7px; color: var(--muted); font-weight: 600; font-size: 12.5px; white-space: nowrap }
+.subtabs button:hover { color: var(--text) }
+.subtabs button.active { background: var(--panel2); color: var(--text) }
 fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px 10px; margin: 0; display: flex; flex-direction: column; gap: 8px }
 legend { padding: 0 6px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; max-width: 100% }
 legend .st { order: 3; flex-basis: 100%; font-weight: 400; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere }

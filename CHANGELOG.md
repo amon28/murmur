@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.1 — 2026-11-25
+**New**
+- **Settings in tabs:** Chat, Listening, Memory and App, instead of one long page. Save still saves all of them.
+
+**Fixed**
+- **Microphone:** if the mic picked in Settings is unplugged or Windows gave it a new ID, Murmur now uses the default mic and says so, instead of failing with "OverconstrainedError".
+- The Microphone box in Settings shows "System default" instead of a blank when the saved mic is missing.
+- Microphone problems are explained in plain words (no permission, no mic found, mic busy in another app), with what to do.
+
 ## 0.8.0 — 2026-11-25
 **New**
 - **Lives in the tray.** Closing the window keeps Murmur running, so reminders still come. Right-click the tray icon for Dictate, Ask about the screen, Type what I say, Start with Windows, and Quit.
